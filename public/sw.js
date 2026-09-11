@@ -1,5 +1,5 @@
 // Service Worker: App offline startbar machen + letzten Stand zwischenspeichern.
-const SHELL = "go-shell-v2";
+const SHELL = "go-shell-v3";
 const DATA = "go-data";
 const IMAGES = "go-images";
 const SHELL_FILES = ["/", "/app.css", "/app.js", "/manifest.webmanifest", "/icons/icon-192.png"];
@@ -24,7 +24,7 @@ async function networkFirst(req, cacheName) {
     if (res.ok) cache.put(req, res.clone());
     return res;
   } catch {
-    const hit = await cache.match(req, { ignoreSearch: true });
+    const hit = await cache.match(req);
     if (hit) return hit;
     if (req.mode === "navigate") return (await caches.match("/")) || Response.error();
     throw new Error("offline");

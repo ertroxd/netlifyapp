@@ -2,7 +2,7 @@
 // Alle Routen liegen unter /api/* und brauchen den Header "x-group-password".
 
 import { getStore } from "@netlify/blobs";
-import { randomUUID, timingSafeEqual } from "node:crypto";
+import { randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
 
 class HttpError extends Error {
   constructor(status, message) {
@@ -103,49 +103,102 @@ function expenseFields(b) {
   };
 }
 
+// ---------- Gruppen ----------
+// "main" = ursprüngliche Gruppe (Passwort/Name aus GROUP_PASSWORD / GROUP_NAME, Daten im alten Store)
+const MAIN = "main";
+const slugOk = (s) => typeof s === "string" && /^[a-z0-9][a-z0-9-]{1,39}$/.test(s);
+const metaStore = () => getStore({ name: "gruppenorganisator-meta", consistency: "strong" });
+const groupStore = (slug) =>
+  getStore({ name: slug === MAIN ? "gruppenorganisator" : `gruppe-${slug}`, consistency: "strong" });
+const hashPw = (pw, salt) => scryptSync(String(pw ?? ""), salt, 32).toString("hex");
+
+async function resolveGroup(slug) {
+  slug = String(slug || MAIN).toLowerCase();
+  if (slug === MAIN) {
+    const pw = process.env.GROUP_PASSWORD;
+    if (!pw) throw new HttpError(500, "GROUP_PASSWORD ist in Netlify noch nicht gesetzt.");
+    return { slug, name: process.env.GROUP_NAME || "Unsere Gruppe", check: (given) => passwordOk(given, pw) };
+  }
+  const g = slugOk(slug) ? await metaStore().get(`group:${slug}`, { type: "json" }) : null;
+  if (!g) throw new HttpError(404, "Gruppe nicht gefunden – bitte den Code prüfen.");
+  return { slug, name: g.name, check: (given) => passwordOk(hashPw(given, g.salt), g.hash) };
+}
+
+// ---------- Kommentare (Termine & Pinnwand) ----------
+function addComment(item, user, text) {
+  text = str(text, 1000);
+  if (!text) throw new HttpError(400, "Kommentar ist leer.");
+  item.comments = item.comments || [];
+  item.comments.push({ id: randomUUID(), name: user, text, at: new Date().toISOString() });
+  if (item.comments.length > 300) item.comments = item.comments.slice(-300);
+}
+function deleteComment(item, user, cid) {
+  const c = (item.comments || []).find((c) => c.id === cid);
+  if (!c) throw new HttpError(404, "Kommentar nicht gefunden.");
+  if (nameKey(c.name) !== nameKey(user)) throw new HttpError(403, "Nur eigene Kommentare löschen.");
+  item.comments = item.comments.filter((c) => c.id !== cid);
+}
+
 function pollIsOpen(p) {
   return !p.closed && !(p.deadline && p.deadline < todayUTC());
 }
 
 export default async (req) => {
   try {
-    const store = getStore({ name: "gruppenorganisator", consistency: "strong" });
     const url = new URL(req.url);
     const [res, id, sub, subId] = url.pathname.replace(/^\/api\/?/, "").split("/").filter(Boolean);
+    let user = "";
+    try {
+      user = str(decodeURIComponent(req.headers.get("x-user-name") || ""), 40);
+    } catch {}
 
     // Bilder der Pinnwand: öffentlich über nicht erratbare ID (damit <img> ohne Header funktioniert)
-    if (res === "img" && req.method === "GET" && validId(id)) {
-      const data = await store.get(`img:${id}`, { type: "arrayBuffer" });
+    // Neu: /api/img/<gruppe>/<id>   Alt: /api/img/<id> (Hauptgruppe)
+    if (res === "img" && req.method === "GET") {
+      const [slug, imgId] = sub ? [id, sub] : [MAIN, id];
+      if (!validId(imgId) || !(slug === MAIN || slugOk(slug))) return new Response("Nicht gefunden", { status: 404 });
+      const data = await groupStore(slug).get(`img:${imgId}`, { type: "arrayBuffer" });
       if (!data) return new Response("Nicht gefunden", { status: 404 });
       return new Response(data, {
         headers: { "content-type": "image/jpeg", "cache-control": "public, max-age=31536000, immutable" },
       });
     }
 
-    const expected = process.env.GROUP_PASSWORD;
-    if (!expected) {
-      return json({ error: "GROUP_PASSWORD ist in Netlify noch nicht gesetzt." }, 500);
+    // Neue Gruppe anlegen (braucht das Admin-Passwort)
+    if (res === "groups" && !id && req.method === "POST") {
+      const admin = process.env.ADMIN_PASSWORD || process.env.GROUP_PASSWORD;
+      if (!admin) throw new HttpError(500, "ADMIN_PASSWORD ist in Netlify nicht gesetzt.");
+      if (!passwordOk(req.headers.get("x-admin-password"), admin)) throw new HttpError(403, "Admin-Passwort ist falsch.");
+      const b = await req.json().catch(() => ({}));
+      const name = str(b.name, 60);
+      const slug = str(b.slug, 40).toLowerCase();
+      const pw = String(b.password ?? "");
+      if (!name) throw new HttpError(400, "Bitte einen Gruppennamen angeben.");
+      if (!slugOk(slug) || slug === MAIN) throw new HttpError(400, "Code: 2–40 Zeichen, nur a–z, 0–9 und Bindestrich.");
+      if (pw.length < 4) throw new HttpError(400, "Das Gruppen-Passwort braucht mindestens 4 Zeichen.");
+      const m = metaStore();
+      if (await m.get(`group:${slug}`)) throw new HttpError(409, "Dieser Code ist schon vergeben.");
+      const salt = randomBytes(16).toString("hex");
+      await m.setJSON(`group:${slug}`, { slug, name, salt, hash: hashPw(pw, salt), createdBy: user, createdAt: new Date().toISOString() });
+      return json({ slug, name }, 201);
     }
-    if (!passwordOk(req.headers.get("x-group-password"), expected)) {
+
+    const group = await resolveGroup(req.headers.get("x-group") || MAIN);
+    if (!group.check(req.headers.get("x-group-password"))) {
       return json({ error: "Falsches Gruppen-Passwort." }, 401);
     }
-
-    let user = "";
-    try {
-      user = str(decodeURIComponent(req.headers.get("x-user-name") || ""), 40);
-    } catch {}
-
-    const groupName = process.env.GROUP_NAME || "Unsere Gruppe";
+    const store = groupStore(group.slug);
+    const groupName = group.name;
     const method = req.method;
     const body = ["POST", "PUT", "PATCH"].includes(method) ? await req.json().catch(() => ({})) : {};
 
-    if (res === "login" && method === "POST") return json({ ok: true, groupName });
+    if (res === "login" && method === "POST") return json({ ok: true, groupName, slug: group.slug });
 
     if (res === "state" && method === "GET") {
       const [events, polls, posts, expenses] = await Promise.all(
         ["event:", "poll:", "post:", "expense:"].map((p) => readAll(store, p))
       );
-      return json({ groupName, events, polls, posts, expenses, serverDate: todayUTC() });
+      return json({ groupName, slug: group.slug, events, polls, posts, expenses, serverDate: todayUTC() });
     }
 
     // Ab hier: alles Schreibende braucht einen Namen
@@ -187,24 +240,10 @@ export default async (req) => {
         );
       }
       if (id && sub === "comments" && method === "POST") {
-        const text = str(body.text, 1000);
-        if (!text) throw new HttpError(400, "Kommentar ist leer.");
-        return json(
-          await mutate(store, key, (e) => {
-            e.comments.push({ id: randomUUID(), name: user, text, at: new Date().toISOString() });
-            if (e.comments.length > 300) e.comments = e.comments.slice(-300);
-          })
-        );
+        return json(await mutate(store, key, (e) => addComment(e, user, body.text)));
       }
       if (id && sub === "comments" && subId && method === "DELETE") {
-        return json(
-          await mutate(store, key, (e) => {
-            const c = e.comments.find((c) => c.id === subId);
-            if (!c) throw new HttpError(404, "Kommentar nicht gefunden.");
-            if (nameKey(c.name) !== nameKey(user)) throw new HttpError(403, "Nur eigene Kommentare löschen.");
-            e.comments = e.comments.filter((c) => c.id !== subId);
-          })
-        );
+        return json(await mutate(store, key, (e) => deleteComment(e, user, subId)));
       }
     }
 
@@ -303,6 +342,7 @@ export default async (req) => {
           imageId,
           pinned: false,
           likes: {},
+          comments: [],
           createdBy: user,
           createdAt: new Date().toISOString(),
         };
@@ -323,6 +363,12 @@ export default async (req) => {
             else p.likes[k] = user;
           })
         );
+      }
+      if (id && sub === "comments" && method === "POST") {
+        return json(await mutate(store, key, (p) => addComment(p, user, body.text)));
+      }
+      if (id && sub === "comments" && subId && method === "DELETE") {
+        return json(await mutate(store, key, (p) => deleteComment(p, user, subId)));
       }
       if (id && sub === "pin" && method === "POST") {
         return json(await mutate(store, key, (p) => (p.pinned = !!body.pinned)));

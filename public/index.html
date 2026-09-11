@@ -20,12 +20,14 @@
   <div class="card">
     <div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round"><rect x="4" y="5" width="16" height="15" rx="3"/><path d="M4 10h16M9 3v4M15 3v4"/></svg></div>
     <h1>Gruppenorganisator</h1>
-    <p>Termine, Umfragen, Pinnwand und Kosten – alles an einem Ort.</p>
+    <p id="login-sub">Termine, Umfragen, Pinnwand und Kosten – alles an einem Ort.</p>
     <form id="login-form">
+      <label id="login-group-label">Gruppen-Code<input type="text" name="group" maxlength="40" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="leer lassen = Hauptgruppe"></label>
       <label>Dein Name<input type="text" name="name" maxlength="40" autocomplete="nickname" required placeholder="z. B. Erik"></label>
       <label>Gruppen-Passwort<input type="password" name="pw" autocomplete="current-password" required></label>
       <p class="form-err" id="login-err" hidden></p>
       <button class="btn primary" style="justify-content:center;padding:11px">Los geht's</button>
+      <button type="button" class="btn ghost" id="login-cancel" style="justify-content:center" hidden>Zurück</button>
     </form>
   </div>
 </section>
@@ -36,8 +38,8 @@
     <div class="wrap">
       <div class="top-row">
         <div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round"><rect x="4" y="5" width="16" height="15" rx="3"/><path d="M4 10h16M9 3v4M15 3v4"/></svg></div>
-        <h1 id="group-name">Gruppe</h1>
-        <div class="me">Hallo <b id="me-name"></b><br><button id="logout">Abmelden</button></div>
+        <button class="group-btn" id="group-btn" aria-haspopup="dialog"><h1 id="group-name">Gruppe</h1><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 9l6 6 6-6"/></svg></button>
+        <div class="me">Hallo <b id="me-name"></b><br><button id="logout">Gruppen</button></div>
       </div>
     </div>
   </header>
@@ -80,6 +82,36 @@
     <div class="dlg-foot">
       <button type="button" class="btn ghost" data-close>Abbrechen</button>
       <button class="btn primary" value="save">Speichern</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- Gruppen -->
+<dialog id="groups-dlg">
+  <form method="dialog">
+    <h2>Deine Gruppen</h2>
+    <div class="group-list" id="group-list"></div>
+    <div class="actions">
+      <button type="button" class="btn small" id="g-invite">Einladen</button>
+      <button type="button" class="btn small" id="g-join">Anderer Gruppe beitreten</button>
+      <button type="button" class="btn small" id="g-create">Neue Gruppe</button>
+      <button type="button" class="btn small ghost danger" id="g-leave">Aktuelle Gruppe verlassen</button>
+    </div>
+    <div class="dlg-foot"><button class="btn primary">Fertig</button></div>
+  </form>
+</dialog>
+
+<dialog id="create-dlg">
+  <form method="dialog" id="create-form">
+    <h2>Neue Gruppe erstellen</h2>
+    <label>Gruppenname<input type="text" name="gname" maxlength="60" required placeholder="z. B. Fußball Donnerstag"></label>
+    <label>Gruppen-Code (für den Einladungslink)<input type="text" name="slug" maxlength="40" required autocapitalize="none" spellcheck="false" pattern="[a-z0-9][a-z0-9\-]{1,39}" placeholder="fussball-donnerstag"></label>
+    <label>Gruppen-Passwort (bekommen alle Mitglieder)<input type="text" name="gpw" minlength="4" required autocomplete="off"></label>
+    <label>Admin-Passwort (nur zum Erstellen)<input type="password" name="admin" required autocomplete="off"></label>
+    <p class="form-err" hidden></p>
+    <div class="dlg-foot">
+      <button type="button" class="btn ghost" data-close>Abbrechen</button>
+      <button class="btn primary" value="save">Erstellen</button>
     </div>
   </form>
 </dialog>

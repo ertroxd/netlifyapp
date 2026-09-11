@@ -47,7 +47,17 @@ const I = {
 };
 
 /* ---------- Zustand ---------- */
-let auth = store.get("go-auth"); // { name, pw }
+// Mitgliedschaften: [{ slug, groupName, name, pw }] – ein Gerät kann in mehreren Gruppen sein
+let groups = store.get("go-groups") || [];
+(() => { // Umzug von der Ein-Gruppen-Version
+  const old = store.get("go-auth");
+  if (old?.pw && !groups.length) { groups = [{ slug: "main", groupName: "", name: old.name, pw: old.pw }]; store.set("go-groups", groups); store.set("go-current", "main"); }
+  store.del("go-auth");
+})();
+let auth = groups.find((g) => g.slug === store.get("go-current")) || groups[0] || null;
+const saveGroups = () => { store.set("go-groups", groups); store.set("go-current", auth?.slug || null); };
+const slugify = (s) => String(s).toLowerCase().replace(/ä/g, "ae").replace(/ö/g, "oe").replace(/ü/g, "ue").replace(/ß/g, "ss").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
+const inviteParam = new URLSearchParams(location.search).get("g");
 let state = { events: [], polls: [], posts: [], expenses: [], groupName: "" };
 let loaded = false;
 const TABS = ["events", "polls", "board", "costs"];
@@ -56,7 +66,8 @@ const expanded = new Set();
 let showPast = false, showClosed = false, showAllExpenses = false;
 let editingEventId = null;
 let pollKind = "text";
-let boardSeen = store.get("go-board-seen") || "";
+let boardSeen = "";
+const seenKey = () => "go-board-seen:" + (auth?.slug || "main");
 let composerImage = null; // dataURL des verkleinerten Fotos
 const euro = new Intl.NumberFormat("de-DE", { style: "currency", currency: "EUR" });
 const money = (cents) => euro.format(cents / 100);
@@ -67,13 +78,14 @@ async function api(method, path, body) {
     method,
     headers: {
       "content-type": "application/json",
+      "x-group": auth?.slug || "main",
       "x-group-password": auth?.pw || "",
       "x-user-name": encodeURIComponent(auth?.name || ""),
     },
     body: body ? JSON.stringify(body) : undefined,
   }).catch(() => { throw new Error("Keine Verbindung – bitte später nochmal versuchen."); });
   const data = await r.json().catch(() => ({}));
-  if (r.status === 401) { logout(data.error); throw new Error(data.error || "Nicht angemeldet"); }
+  if (r.status === 401 && path !== "login") { logout(data.error); throw new Error(data.error || "Nicht angemeldet"); }
   if (!r.ok) throw new Error(data.error || "Fehler " + r.status);
   return data;
 }
@@ -98,10 +110,13 @@ function toast(msg) {
 
 async function refresh() {
   try {
-    const data = await api("GET", "state");
+    const slug = auth.slug;
+    const data = await api("GET", "state?g=" + encodeURIComponent(slug));
+    if (!auth || auth.slug !== slug) return; // inzwischen Gruppe gewechselt
     state = { posts: [], expenses: [], ...data };
     loaded = true;
-    if (!boardSeen) { boardSeen = state.posts.reduce((m, p) => (p.createdAt > m ? p.createdAt : m), "") || new Date().toISOString(); store.set("go-board-seen", boardSeen); }
+    if (!boardSeen) { boardSeen = boardNewest() || new Date().toISOString(); store.set(seenKey(), boardSeen); }
+    if (data.groupName && auth.groupName !== data.groupName) { auth.groupName = data.groupName; saveGroups(); }
     $("#group-name").textContent = data.groupName;
     document.title = data.groupName + " · Gruppenorganisator";
     render();
@@ -109,42 +124,127 @@ async function refresh() {
 }
 
 /* ---------- Login ---------- */
-function showLogin(err) {
+let joining = false; // Login-Maske wurde aus der App heraus geöffnet ("Anderer Gruppe beitreten")
+function showLogin(err, { slug = "", name = "" } = {}) {
   $("#app").hidden = true;
   $("#login").hidden = false;
   const f = $("#login-form");
-  if (auth?.name) f.name.value = auth.name;
+  f.group.value = slug === "main" ? "" : slug;
+  f.name.value = name || auth?.name || groups[0]?.name || "";
+  f.pw.value = "";
+  $("#login-cancel").hidden = !(joining && auth?.pw);
+  $("#login-sub").textContent = slug && slug !== "main" ? `Du wurdest in die Gruppe „${slug}“ eingeladen.` : "Termine, Umfragen, Pinnwand und Kosten – alles an einem Ort.";
   $("#login-err").hidden = !err;
   $("#login-err").textContent = err || "";
+  (f.name.value ? f.pw : f.name).focus();
 }
 function logout(err) {
-  auth = auth ? { name: auth.name } : null;
-  store.set("go-auth", auth);
-  showLogin(err);
+  // Passwort falsch/geändert: Mitgliedschaft behalten, aber neu anmelden lassen
+  const g = auth;
+  if (g) { g.pw = ""; saveGroups(); }
+  joining = false;
+  showLogin(err, { slug: g?.slug, name: g?.name });
 }
 $("#login-form").addEventListener("submit", async (ev) => {
   ev.preventDefault();
   const f = ev.target;
   const name = f.name.value.trim(), pw = f.pw.value;
+  const slug = slugify(f.group.value) || "main";
   if (!name) return;
-  auth = { name, pw };
-  const btn = f.querySelector("button");
+  const prev = auth;
+  auth = { slug, name, pw, groupName: "" };
+  const btn = f.querySelector("button.primary");
   btn.disabled = true;
   try {
-    await api("POST", "login");
-    store.set("go-auth", auth);
-    f.pw.value = "";
-    startApp();
+    const r = await api("POST", "login");
+    auth.groupName = r.groupName;
+    groups = groups.filter((g) => g.slug !== slug);
+    groups.push(auth);
+    saveGroups();
+    if (inviteParam) history.replaceState(null, "", location.pathname);
+    joining = false;
+    switchGroup(slug);
   } catch (e) {
+    auth = prev;
     $("#login-err").textContent = e.message; $("#login-err").hidden = false;
   } finally { btn.disabled = false; }
 });
-$("#logout").onclick = () => { store.del("go-auth"); auth = null; try { caches.delete("go-data"); } catch {} showLogin(); };
+$("#login-cancel").onclick = () => { joining = false; startApp(); };
+$("#logout").onclick = () => openGroups();
+$("#group-btn").onclick = () => openGroups();
+
+function switchGroup(slug) {
+  auth = groups.find((g) => g.slug === slug) || auth;
+  saveGroups();
+  state = { events: [], polls: [], posts: [], expenses: [], groupName: auth.groupName };
+  loaded = false;
+  expanded.clear();
+  composerImage = null;
+  boardSeen = store.get(seenKey()) || "";
+  startApp();
+}
+
+/* ---------- Gruppen-Dialog ---------- */
+function openGroups() {
+  $("#group-list").innerHTML = groups.map((g) => `<button type="button" class="group-item" data-slug="${esc(g.slug)}" aria-current="${g.slug === auth?.slug}">
+      <span class="avatar" style="background:hsl(${hue(g.groupName || g.slug)} 55% 50%)">${esc((g.groupName || g.slug)[0].toUpperCase())}</span>
+      <span class="grow"><b>${esc(g.groupName || g.slug)}</b><span>Code: ${esc(g.slug === "main" ? "Hauptgruppe" : g.slug)} · als ${esc(g.name)}${g.pw ? "" : " · Anmeldung nötig"}</span></span>
+    </button>`).join("");
+  $("#groups-dlg").showModal();
+}
+$("#group-list").addEventListener("click", (ev) => {
+  const b = ev.target.closest("[data-slug]"); if (!b) return;
+  const g = groups.find((x) => x.slug === b.dataset.slug);
+  $("#groups-dlg").close();
+  if (g.pw) switchGroup(g.slug);
+  else { auth = g; showLogin("", { slug: g.slug, name: g.name }); }
+});
+const inviteLink = () => location.origin + "/" + (auth.slug === "main" ? "" : "?g=" + encodeURIComponent(auth.slug));
+$("#g-invite").onclick = () => share(`Komm in unsere Gruppe „${auth.groupName || state.groupName}“ 👋\n${inviteLink()}\n\nDas Passwort schicke ich dir separat.`);
+$("#g-join").onclick = () => { $("#groups-dlg").close(); joining = true; showLogin("", { slug: "" }); $("#login-form").group.focus(); };
+$("#g-create").onclick = () => {
+  $("#groups-dlg").close();
+  const f = $("#create-form"); f.reset(); f.slug.dataset.touched = "";
+  f.querySelector(".form-err").hidden = true;
+  $("#create-dlg").showModal(); f.gname.focus();
+};
+$("#g-leave").onclick = () => {
+  if (!confirm(`Gruppe „${auth.groupName || auth.slug}“ auf diesem Gerät verlassen? Die Daten der Gruppe bleiben erhalten.`)) return;
+  try { caches.open("go-data").then((c) => c.delete("/api/state?g=" + encodeURIComponent(auth.slug))); } catch {}
+  store.del(seenKey());
+  groups = groups.filter((g) => g.slug !== auth.slug);
+  auth = groups.find((g) => g.pw) || groups[0] || null;
+  saveGroups();
+  $("#groups-dlg").close();
+  if (auth?.pw) switchGroup(auth.slug); else { joining = false; showLogin("", { slug: auth?.slug || "", name: auth?.name }); }
+};
+$("#create-form").gname.addEventListener("input", (e) => { const f = $("#create-form"); if (!f.slug.dataset.touched) f.slug.value = slugify(e.target.value); });
+$("#create-form").slug.addEventListener("input", (e) => { e.target.dataset.touched = "1"; });
+$("#create-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const f = ev.target, err = f.querySelector(".form-err");
+  const slug = slugify(f.slug.value);
+  try {
+    const r = await fetch("/api/groups", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-admin-password": f.admin.value, "x-user-name": encodeURIComponent(auth.name) },
+      body: JSON.stringify({ name: f.gname.value, slug, password: f.gpw.value }),
+    }).catch(() => { throw new Error("Keine Verbindung – bitte später nochmal versuchen."); });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || "Fehler " + r.status);
+    groups = groups.filter((g) => g.slug !== data.slug);
+    groups.push({ slug: data.slug, groupName: data.name, name: auth.name, pw: f.gpw.value });
+    $("#create-dlg").close();
+    switchGroup(data.slug);
+    toast("Gruppe erstellt – lade jetzt Leute ein (Gruppen → Einladen)");
+  } catch (e) { err.textContent = e.message; err.hidden = false; }
+});
 
 function startApp() {
   $("#login").hidden = true;
   $("#app").hidden = false;
   $("#me-name").textContent = auth.name;
+  $("#group-name").textContent = auth.groupName || state.groupName || "Gruppe";
   updateInstallBanner();
   render();
   refresh();
@@ -209,10 +309,10 @@ function render() {
   $("#fab").innerHTML = I.plus + { events: "Termin", polls: "Abstimmung", costs: "Ausgabe", board: "" }[tab];
   $("#fab").hidden = tab === "board";
   if (tab === "board" && loaded) {
-    const newest = (state.posts || []).reduce((m, p) => (p.createdAt > m ? p.createdAt : m), "");
-    if (newest > boardSeen) { boardSeen = newest; store.set("go-board-seen", boardSeen); }
+    const newest = boardNewest();
+    if (newest > boardSeen) { boardSeen = newest; store.set(seenKey(), boardSeen); }
   }
-  const boardNew = boardSeen ? (state.posts || []).filter((p) => p.createdAt > boardSeen && keyOf(p.createdBy) !== me).length : 0;
+  const boardNew = boardSeen ? boardActivity().filter((a) => a.at > boardSeen && keyOf(a.name) !== me).length : 0;
   const myBal = balances().find((b) => keyOf(b.name) === me)?.bal || 0;
   $("#badge-board").hidden = !boardNew; $("#badge-board").textContent = boardNew;
   $("#badge-costs").hidden = myBal >= 0; $("#badge-costs").textContent = "€";
@@ -295,7 +395,7 @@ function eventCard(e, isPast) {
         </div>
         ${!isPast && mine ? `<form class="inline-form" data-action="note"><input type="text" name="note" maxlength="140" data-draft="note-${e.id}" placeholder="Notiz zu deiner Antwort, z. B. „komme später“" value="${esc(e.rsvps[me].note || "")}"><button class="btn small">Speichern</button></form>` : ""}
         <div class="comments">
-          ${(e.comments || []).map((c) => `<div class="comment"><div class="head"><b>${esc(c.name)}</b>${ago(c.at)}${keyOf(c.name) === me ? `<button data-action="del-comment" data-cid="${c.id}">löschen</button>` : ""}</div><p>${esc(c.text)}</p></div>`).join("")}
+          ${(e.comments || []).map((c) => commentHtml(c, me)).join("")}
           <form class="inline-form" data-action="comment"><input type="text" name="text" maxlength="1000" data-draft="c-${e.id}" placeholder="Kommentar schreiben…" required><button class="btn small primary">Senden</button></form>
         </div>
         ${eventCostLine(e)}
@@ -393,8 +493,10 @@ $("#main").addEventListener("click", (ev) => {
       const next = e.rsvps?.[me]?.status === s ? null : s;
       return run(async () => upsert("events", await api("POST", `events/${id}/rsvp`, { status: next, note: e.rsvps?.[me]?.note || "" })));
     }
-    case "del-comment":
-      return run(async () => upsert("events", await api("DELETE", `events/${id}/comments/${el.dataset.cid}`)));
+    case "del-comment": {
+      const kind = card.dataset.type === "post" ? "posts" : "events";
+      return run(async () => upsert(kind, await api("DELETE", `${kind}/${id}/comments/${el.dataset.cid}`)));
+    }
     case "ics": return downloadIcs(e);
     case "share": return share(e ? eventText(e) : pollText(p));
     case "edit-event": return openEventDialog(e);
@@ -433,6 +535,9 @@ $("#main").addEventListener("submit", (ev) => {
   if (action === "comment") {
     const text = f.text.value.trim(); if (!text) return;
     run(async () => { upsert("events", await api("POST", `events/${id}/comments`, { text })); clear(); });
+  } else if (action === "post-comment") {
+    const text = f.text.value.trim(); if (!text) return;
+    run(async () => { upsert("posts", await api("POST", `posts/${id}/comments`, { text })); clear(); });
   } else if (action === "note") {
     run(async () => { upsert("events", await api("POST", `events/${id}/rsvp`, { status: e.rsvps[keyOf(auth.name)].status, note: f.note.value })); toast("Notiz gespeichert"); });
   } else if (action === "add-option") {
@@ -556,6 +661,9 @@ async function share(text) {
 }
 
 /* ---------- Pinnwand ---------- */
+const boardActivity = () => (state.posts || []).flatMap((p) => [{ at: p.createdAt, name: p.createdBy }, ...(p.comments || []).map((c) => ({ at: c.at, name: c.name }))]);
+const boardNewest = () => boardActivity().reduce((m, a) => (a.at > m ? a.at : m), "");
+const commentHtml = (c, me) => `<div class="comment"><div class="head"><b>${esc(c.name)}</b>${ago(c.at)}${keyOf(c.name) === me ? `<button data-action="del-comment" data-cid="${c.id}">löschen</button>` : ""}</div><p>${linkify(c.text)}</p></div>`;
 function renderBoard() {
   const posts = [...state.posts].sort((a, b) => (b.pinned - a.pinned) || b.createdAt.localeCompare(a.createdAt));
   let h = `<form class="card composer" id="composer">
@@ -576,16 +684,24 @@ function renderBoard() {
 function postCard(p) {
   const me = keyOf(auth.name);
   const likes = Object.values(p.likes || {});
+  const cs = p.comments || [];
+  const open = expanded.has(p.id);
   return `<article class="card post ${p.pinned ? "pinned" : ""}" data-type="post" data-id="${p.id}">
     <div class="head">${avatar(p.createdBy)}<div class="who"><b>${esc(p.createdBy)}</b><span>${ago(p.createdAt)}</span></div>${p.pinned ? '<span class="tag todo">Angepinnt</span>' : ""}</div>
     ${p.text ? `<p class="text">${linkify(p.text)}</p>` : ""}
-    ${p.imageId ? `<a class="photo" href="/api/img/${p.imageId}" target="_blank" rel="noopener"><img src="/api/img/${p.imageId}" alt="Foto von ${esc(p.createdBy)}" loading="lazy"></a>` : ""}
+    ${p.imageId ? `<a class="photo" href="/api/img/${esc(auth.slug)}/${p.imageId}" target="_blank" rel="noopener"><img src="/api/img/${esc(auth.slug)}/${p.imageId}" alt="Foto von ${esc(p.createdBy)}" loading="lazy"></a>` : ""}
     <div class="post-foot">
       <button class="btn small like" data-action="like" aria-pressed="${!!p.likes?.[me]}" aria-label="Gefällt mir">${I.heart}${likes.length || ""}</button>
-      <span class="likers">${likes.length ? esc(likes.join(", ")) + " gefällt das" : ""}</span>
+      <button class="btn small" data-action="expand" aria-expanded="${open}">${I.chat}${cs.length ? cs.length + (cs.length === 1 ? " Antwort" : " Antworten") : "Antworten"}</button>
+      <span class="spacer"></span>
       <button class="btn small ghost" data-action="pin-post">${p.pinned ? "Lösen" : "Anpinnen"}</button>
-      <button class="btn small ghost danger" data-action="del-post">Löschen</button>
+      <button class="icon-btn" data-action="del-post" aria-label="Beitrag löschen" title="Löschen">${I.trash}</button>
     </div>
+    ${likes.length ? `<div class="likers">${esc(likes.join(", "))} gefällt das</div>` : ""}
+    ${open
+      ? `<div class="comments">${cs.map((c) => commentHtml(c, me)).join("")}
+          <form class="inline-form" data-action="post-comment"><input type="text" name="text" maxlength="1000" data-draft="pc-${p.id}" placeholder="Antworten…" required><button class="btn small primary">Senden</button></form></div>`
+      : cs.length ? `<div class="reply-preview"><b>${esc(cs[cs.length - 1].name)}:</b> ${esc(cs[cs.length - 1].text.slice(0, 140))}${cs[cs.length - 1].text.length > 140 ? "…" : ""}</div>` : ""}
   </article>`;
 }
 
@@ -832,4 +948,7 @@ setInterval(() => {
 document.addEventListener("visibilitychange", () => { if (!document.hidden && auth?.pw) refresh(); });
 
 /* ---------- Start ---------- */
-if (auth?.pw) startApp(); else showLogin();
+if (inviteParam && !groups.some((g) => g.slug === slugify(inviteParam) && g.pw)) { joining = !!auth?.pw; showLogin("", { slug: slugify(inviteParam) }); }
+else if (inviteParam) { history.replaceState(null, "", location.pathname); switchGroup(slugify(inviteParam)); }
+else if (auth?.pw) { boardSeen = store.get(seenKey()) || ""; startApp(); }
+else showLogin("", { slug: auth?.slug, name: auth?.name });
