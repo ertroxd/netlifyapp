@@ -1,8 +1,8 @@
 // Service Worker: App offline startbar machen + letzten Stand zwischenspeichern.
-const SHELL = "go-shell-v4";
+const SHELL = "go-shell-v5";
 const DATA = "go-data";
 const IMAGES = "go-images";
-const SHELL_FILES = ["/", "/app.css", "/app.js", "/manifest.webmanifest", "/icons/icon-192.png"];
+const SHELL_FILES = ["/", "/app.css", "/app.js", "/chat.js", "/manifest.webmanifest", "/icons/icon-192.png"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(SHELL).then((c) => c.addAll(SHELL_FILES)));

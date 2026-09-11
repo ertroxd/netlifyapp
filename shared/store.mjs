@@ -8,7 +8,7 @@ export const metaStore = () => getStore({ name: "gruppenorganisator-meta", consi
 export const groupStore = (slug) =>
   getStore({ name: slug === MAIN ? "gruppenorganisator" : `gruppe-${slug}`, consistency: "strong" });
 
-export const DATA_PREFIXES = ["event:", "poll:", "post:", "expense:"];
+export const DATA_PREFIXES = ["event:", "poll:", "expense:"];
 
 export async function readAll(store, prefix) {
   const { blobs } = await store.list({ prefix });
@@ -35,12 +35,50 @@ export async function allGroups() {
 export const berlinDate = (offsetDays = 0) =>
   new Date(Date.now() + offsetDays * 86400000).toLocaleDateString("sv-SE", { timeZone: "Europe/Berlin" });
 
+// ---------- Medien (Videos in Stücken) & Stories ----------
+export const STORY_HOURS = 24;
+
+export async function deleteMedia(store, id) {
+  if (!id) return;
+  const { blobs } = await store.list({ prefix: `media:${id}:` });
+  await Promise.all(blobs.map((b) => store.delete(b.key)));
+  await store.delete(`mediameta:${id}`);
+}
+async function deleteStoryFiles(store, s) {
+  if (s.imageId) await store.delete(`img:${s.imageId}`);
+  if (s.thumbId) await store.delete(`img:${s.thumbId}`);
+  if (s.media?.id) await deleteMedia(store, s.media.id);
+}
+export async function deleteStory(store, s) {
+  await deleteStoryFiles(store, s);
+  await store.delete(`story:${s.id}`);
+}
+// Liefert alle noch sichtbaren Stories (aktiv oder im Archiv) und löscht abgelaufene
+export async function cleanupStories(store) {
+  const all = await readAll(store, "story:");
+  const now = new Date().toISOString();
+  const keep = [];
+  for (const s of all) {
+    if (!s.archived && s.expiresAt < now) await deleteStory(store, s).catch(() => {});
+    else keep.push(s);
+  }
+  return keep;
+}
+
 // ---------- Backups ----------
 const KEEP_BACKUPS = 14;
+// Welche Daten ins Backup kommen (Prefix -> Feld in der Backup-Datei)
+const BACKUP_PARTS = {
+  "event:": "events", "poll:": "polls", "expense:": "expenses",
+  "msg:": "messages", "story:": "stories", "profile:": "profiles", "post:": "posts",
+};
+const keyFor = (prefix, x) => prefix + (prefix === "profile:" ? String(x.name || "").trim().toLowerCase() : x.id);
 
 export async function snapshot(store, label = berlinDate()) {
-  const [events, polls, posts, expenses] = await Promise.all(DATA_PREFIXES.map((p) => readAll(store, p)));
-  await store.setJSON(`backup:${label}`, { version: 1, createdAt: new Date().toISOString(), data: { events, polls, posts, expenses } });
+  const data = {};
+  for (const [prefix, field] of Object.entries(BACKUP_PARTS)) data[field] = await readAll(store, prefix);
+  data.stories = data.stories.filter((s) => s.archived); // abgelaufene Stories braucht kein Backup
+  await store.setJSON(`backup:${label}`, { version: 2, createdAt: new Date().toISOString(), data });
   // Alte automatische Backups aufräumen (nur die täglichen, JJJJ-MM-TT)
   const { blobs } = await store.list({ prefix: "backup:" });
   const daily = blobs.map((b) => b.key).filter((k) => /^backup:\d{4}-\d{2}-\d{2}$/.test(k)).sort();
@@ -56,15 +94,21 @@ export async function listBackups(store) {
 }
 
 export async function restore(store, data) {
-  const lists = { "event:": data?.events, "poll:": data?.polls, "post:": data?.posts, "expense:": data?.expenses };
-  for (const v of Object.values(lists)) if (!Array.isArray(v)) throw new Error("Backup-Datei ist ungültig.");
+  for (const f of ["events", "polls", "expenses"]) if (!Array.isArray(data?.[f])) throw new Error("Backup-Datei ist ungültig.");
   const ts = new Date().toISOString().slice(0, 16).replace(":", "");
   await snapshot(store, `${ts}-vor-restore`);
-  for (const prefix of DATA_PREFIXES) {
+  // Altes Backup (vor dem Chat): Pinnwand-Beiträge neu in den Chat übernehmen lassen
+  const oldFormat = !Array.isArray(data.messages) && Array.isArray(data.posts);
+  if (oldFormat) data = { ...data, messages: [] };
+  for (const [prefix, field] of Object.entries(BACKUP_PARTS)) {
+    const list = data[field];
+    if (!Array.isArray(list)) continue;
     const { blobs } = await store.list({ prefix });
     await Promise.all(blobs.map((b) => store.delete(b.key)));
     await Promise.all(
-      lists[prefix].filter((x) => x && typeof x.id === "string" && /^[\w-]{1,64}$/.test(x.id)).map((x) => store.setJSON(prefix + x.id, x))
+      list.filter((x) => x && (prefix === "profile:" ? x.name : typeof x.id === "string" && /^[\w-]{1,64}$/.test(x.id)))
+        .map((x) => store.setJSON(keyFor(prefix, x), x))
     );
   }
+  if (oldFormat) await store.delete("chat-migrated");
 }

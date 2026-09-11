@@ -20,7 +20,7 @@
   <div class="card">
     <div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round"><rect x="4" y="5" width="16" height="15" rx="3"/><path d="M4 10h16M9 3v4M15 3v4"/></svg></div>
     <h1>Gruppenorganisator</h1>
-    <p id="login-sub">Termine, Umfragen, Pinnwand und Kosten – alles an einem Ort.</p>
+    <p id="login-sub">Termine, Umfragen, Chat und Kosten – alles an einem Ort.</p>
     <form id="login-form">
       <label id="login-group-label">Gruppen-Code<input type="text" name="group" maxlength="40" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="leer lassen = Hauptgruppe"></label>
       <label>Dein Name<input type="text" name="name" maxlength="40" autocomplete="nickname" required placeholder="z. B. Erik"></label>
@@ -39,7 +39,7 @@
       <div class="top-row">
         <div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round"><rect x="4" y="5" width="16" height="15" rx="3"/><path d="M4 10h16M9 3v4M15 3v4"/></svg></div>
         <button class="group-btn" id="group-btn" aria-haspopup="dialog"><h1 id="group-name">Gruppe</h1><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 9l6 6 6-6"/></svg></button>
-        <div class="me">Hallo <b id="me-name"></b> <span class="tag todo" id="me-admin" hidden>Admin</span><br><button id="logout">Gruppen</button></div>
+        <div class="me">Hallo <button class="me-link" id="me-name"></button> <span class="tag todo" id="me-admin" hidden>Admin</span><br><button id="logout">Gruppen</button></div>
       </div>
     </div>
   </header>
@@ -59,10 +59,23 @@
   </div>
   <main class="wrap" id="main"><div class="loading">Lade…</div></main>
   <button class="btn primary fab" id="fab"></button>
+
+  <!-- Chat-Eingabe (liegt außerhalb von <main>, damit Tippen beim Aktualisieren nicht verloren geht) -->
+  <form class="chat-composer" id="chat-composer" hidden autocomplete="off">
+    <div class="wrap">
+      <div class="reply-bar" id="reply-bar" hidden><div><b id="reply-name"></b><span id="reply-text"></span></div><button type="button" class="icon-btn" id="reply-cancel" aria-label="Antwort abbrechen">✕</button></div>
+      <div class="attach-bar" id="attach-bar" hidden></div>
+      <div class="composer-line">
+        <label class="icon-btn attach" aria-label="Foto oder Video anhängen" title="Foto/Video"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg><input type="file" accept="image/*,video/*" id="chat-file" hidden></label>
+        <textarea id="chat-input" rows="1" maxlength="4000" data-mention placeholder="Nachricht…"></textarea>
+        <button class="send" id="chat-send" aria-label="Senden"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M3.4 20.4 21 12 3.4 3.6 3.5 10l12 2-12 2z"/></svg></button>
+      </div>
+    </div>
+  </form>
   <nav class="bottom-nav" role="tablist">
     <button class="tab" role="tab" data-tab="events"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="4" y="5" width="16" height="15" rx="3"/><path d="M4 10h16M9 3v4M15 3v4"/></svg><span>Termine</span><i class="badge" id="badge-events" hidden></i></button>
     <button class="tab" role="tab" data-tab="polls"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 20V10M12 20V4M19 20v-7"/></svg><span>Umfragen</span><i class="badge" id="badge-polls" hidden></i></button>
-    <button class="tab" role="tab" data-tab="board"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4h6l-1 5 3 3H7l3-3zM12 12v8"/></svg><span>Pinnwand</span><i class="badge" id="badge-board" hidden></i></button>
+    <button class="tab" role="tab" data-tab="board"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16v11H9l-5 4z"/></svg><span>Chat</span><i class="badge" id="badge-board" hidden></i></button>
     <button class="tab" role="tab" data-tab="costs"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M17 6.5A6.5 6.5 0 1 0 17 17.5M4 10h9M4 14h9"/></svg><span>Kosten</span><i class="badge" id="badge-costs" hidden></i></button>
   </nav>
 </div>
@@ -103,6 +116,11 @@
       <button type="button" class="btn small" id="g-join">Anderer Gruppe beitreten</button>
       <button type="button" class="btn small" id="g-create">Neue Gruppe</button>
     </div>
+
+    <section class="settings">
+      <h3>Mitglieder <span class="muted" id="member-count"></span></h3>
+      <div class="member-list" id="member-list"></div>
+    </section>
 
     <section class="settings">
       <h3>Benachrichtigungen <span class="muted" id="push-group"></span></h3>
@@ -158,6 +176,58 @@
     </div>
   </form>
 </dialog>
+
+<!-- Story erstellen -->
+<dialog id="story-dlg">
+  <form method="dialog" id="story-form">
+    <h2>Neue Story</h2>
+    <p class="hint">Verschwindet nach 24 Stunden – außer jemand speichert sie im Gruppenarchiv.</p>
+    <div class="story-preview" id="story-preview"></div>
+    <input type="text" name="caption" maxlength="200" placeholder="Bildunterschrift (optional)" data-mention>
+    <div class="progress" id="story-progress" hidden><i></i></div>
+    <p class="form-err" hidden></p>
+    <div class="dlg-foot">
+      <button type="button" class="btn ghost" data-close>Abbrechen</button>
+      <button class="btn primary" value="save">Story teilen</button>
+    </div>
+  </form>
+</dialog>
+<input type="file" accept="image/*,video/*" id="story-file" hidden>
+
+<!-- Vollbild-Ansicht für Stories, Archiv und Chat-Medien -->
+<dialog id="viewer" class="viewer" aria-label="Medien-Ansicht">
+  <div class="v-bars" id="v-bars"></div>
+  <div class="v-head">
+    <button class="v-who" id="v-who"></button>
+    <button class="v-btn" id="v-close" aria-label="Schließen">✕</button>
+  </div>
+  <div class="v-stage" id="v-stage"></div>
+  <button class="v-nav prev" id="v-prev" aria-label="Zurück"></button>
+  <button class="v-nav next" id="v-next" aria-label="Weiter"></button>
+  <div class="v-foot">
+    <p class="v-caption" id="v-caption"></p>
+    <div class="v-actions" id="v-actions"></div>
+  </div>
+</dialog>
+
+<!-- Gruppenarchiv -->
+<dialog id="archive-dlg" class="sheet">
+  <form method="dialog">
+    <div class="sheet-head"><h2>Gruppenarchiv</h2><button class="icon-btn" aria-label="Schließen">✕</button></div>
+    <p class="hint">Gespeicherte Stories bleiben hier dauerhaft. Antippen zum Ansehen und Herunterladen.</p>
+    <div class="chips" id="archive-filter"></div>
+    <div class="media-grid" id="archive-grid"></div>
+  </form>
+</dialog>
+
+<!-- Profil -->
+<dialog id="profile-dlg" class="sheet">
+  <form method="dialog" id="profile-form">
+    <div class="sheet-head"><span></span><button type="button" class="icon-btn" data-close aria-label="Schließen">✕</button></div>
+    <div id="profile-body"></div>
+  </form>
+</dialog>
+<input type="file" accept="image/*" id="avatar-file" hidden>
 
 <!-- iOS-Installationshinweis -->
 <dialog id="ios-dlg">
@@ -224,5 +294,6 @@
 <div class="mention-box" id="mention-box" role="listbox" hidden></div>
 
 <script src="/app.js"></script>
+<script src="/chat.js"></script>
 </body>
 </html>

@@ -62,19 +62,17 @@ const saveGroups = () => { store.set("go-groups", groups); store.set("go-current
 const slugify = (s) => String(s).toLowerCase().replace(/ä/g, "ae").replace(/ö/g, "oe").replace(/ü/g, "ue").replace(/ß/g, "ss").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
 const inviteParam = new URLSearchParams(location.search).get("g");
 const tabParam = new URLSearchParams(location.search).get("t");
-let state = { events: [], polls: [], posts: [], expenses: [], groupName: "" };
+let state = { events: [], polls: [], expenses: [], profiles: [], stories: [], groupName: "" };
 let loaded = false;
 const TABS = ["events", "polls", "board", "costs"];
 let tab = TABS.includes(tabParam) ? tabParam : TABS.includes(store.get("go-tab")) ? store.get("go-tab") : "events";
 const expanded = new Set();
-let showPast = false, showClosed = false, showAllExpenses = false;
+let showPast = false, showClosed = false;
 let editingEventId = null;
 let pollKind = "text";
-let boardSeen = "";
 let adminPw = ""; // Admin-Modus: nur für diese Sitzung im Speicher, nie dauerhaft gespeichert
 const canManage = (x) => !!adminPw || keyOf(x?.createdBy) === keyOf(auth?.name);
-const seenKey = () => "go-board-seen:" + (auth?.slug || "main");
-let composerImage = null; // dataURL des verkleinerten Fotos
+let profileMap = new Map(); // nameKey -> Profil
 const euro = new Intl.NumberFormat("de-DE", { style: "currency", currency: "EUR" });
 const money = (cents) => euro.format(cents / 100);
 
@@ -121,9 +119,9 @@ async function refresh() {
     const slug = auth.slug;
     const data = await api("GET", "state?g=" + encodeURIComponent(slug));
     if (!auth || auth.slug !== slug) return; // inzwischen Gruppe gewechselt
-    state = { posts: [], expenses: [], ...data };
+    state = { expenses: [], profiles: [], stories: [], ...data };
+    profileMap = new Map(state.profiles.map((p) => [keyOf(p.name), p]));
     loaded = true;
-    if (!boardSeen) { boardSeen = boardNewest() || new Date().toISOString(); store.set(seenKey(), boardSeen); }
     if (data.groupName && auth.groupName !== data.groupName) { auth.groupName = data.groupName; saveGroups(); }
     $("#group-name").textContent = data.groupName;
     document.title = data.groupName + " · Gruppenorganisator";
@@ -141,7 +139,7 @@ function showLogin(err, { slug = "", name = "" } = {}) {
   f.name.value = name || auth?.name || groups[0]?.name || "";
   f.pw.value = "";
   $("#login-cancel").hidden = !(joining && auth?.pw);
-  $("#login-sub").textContent = slug && slug !== "main" ? `Du wurdest in die Gruppe „${slug}“ eingeladen.` : "Termine, Umfragen, Pinnwand und Kosten – alles an einem Ort.";
+  $("#login-sub").textContent = slug && slug !== "main" ? `Du wurdest in die Gruppe „${slug}“ eingeladen.` : "Termine, Umfragen, Chat und Kosten – alles an einem Ort.";
   $("#login-err").hidden = !err;
   $("#login-err").textContent = err || "";
   (f.name.value ? f.pw : f.name).focus();
@@ -186,11 +184,11 @@ function switchGroup(slug) {
   $("#me-admin").hidden = true;
   auth = groups.find((g) => g.slug === slug) || auth;
   saveGroups();
-  state = { events: [], polls: [], posts: [], expenses: [], groupName: auth.groupName };
+  state = { events: [], polls: [], expenses: [], profiles: [], stories: [], groupName: auth.groupName };
+  profileMap = new Map();
+  chatReset();
   loaded = false;
   expanded.clear();
-  composerImage = null;
-  boardSeen = store.get(seenKey()) || "";
   startApp();
 }
 
@@ -198,6 +196,7 @@ function switchGroup(slug) {
 function openGroups() {
   renderGroupList();
   $("#groups-dlg").showModal();
+  renderMembers();
   renderPushSettings();
   renderAdmin();
   loadBackups();
@@ -227,7 +226,6 @@ $("#g-create").onclick = () => {
 $("#g-leave").onclick = () => {
   if (!confirm(`Gruppe „${auth.groupName || auth.slug}“ auf diesem Gerät verlassen? Die Daten der Gruppe bleiben erhalten.`)) return;
   try { caches.open("go-data").then((c) => c.delete("/api/state?g=" + encodeURIComponent(auth.slug))); } catch {}
-  store.del(seenKey());
   groups = groups.filter((g) => g.slug !== auth.slug);
   auth = groups.find((g) => g.pw) || groups[0] || null;
   saveGroups();
@@ -264,6 +262,7 @@ function startApp() {
   updateInstallBanner();
   updatePushBanner();
   syncPush();
+  chatStart();
   render();
   refresh();
 }
@@ -275,10 +274,9 @@ function knownPeople() {
   for (const e of state.events) { add(e.createdBy); Object.values(e.rsvps || {}).forEach((r) => add(r.name)); (e.comments || []).forEach((c) => add(c.name)); }
   for (const p of state.polls) { add(p.createdBy); Object.values(p.votes || {}).forEach((v) => add(v.name)); }
   const addReacts = (x) => Object.values(x.reactions || {}).forEach((m) => Object.values(m).forEach(add));
-  for (const p of state.posts || []) {
-    add(p.createdBy); Object.values(p.likes || {}).forEach(add); addReacts(p);
-    (p.comments || []).forEach((c) => { add(c.name); addReacts(c); });
-  }
+  for (const m of chat.messages) { add(m.createdBy); addReacts(m); }
+  for (const s of state.stories || []) add(s.createdBy);
+  for (const p of state.profiles || []) add(p.name);
   for (const x of state.expenses || []) { add(x.paidBy); x.participants.forEach(add); }
   add(auth?.name);
   return m;
@@ -289,37 +287,14 @@ function splitCents(amount, n) {
   const base = Math.floor(amount / n), rest = amount - base * n;
   return Array.from({ length: n }, (_, i) => base + (i < rest ? 1 : 0));
 }
-function balances() {
-  const b = new Map(); // key -> { name, bal, paid, share }
-  const acc = (name) => { const k = keyOf(name); if (!b.has(k)) b.set(k, { name, bal: 0, paid: 0, share: 0 }); return b.get(k); };
-  for (const x of state.expenses || []) {
-    const payer = acc(x.paidBy);
-    payer.bal += x.amount;
-    if (x.type !== "transfer") payer.paid += x.amount;
-    splitCents(x.amount, x.participants.length).forEach((s, i) => {
-      const p = acc(x.participants[i]);
-      p.bal -= s;
-      if (x.type !== "transfer") p.share += s;
-    });
-  }
-  return [...b.values()];
-}
-function settleUp(list) {
-  const cred = list.filter((p) => p.bal > 0).map((p) => ({ ...p })).sort((a, b) => b.bal - a.bal);
-  const debt = list.filter((p) => p.bal < 0).map((p) => ({ ...p, bal: -p.bal })).sort((a, b) => b.bal - a.bal);
-  const out = [];
-  let i = 0, j = 0;
-  while (i < debt.length && j < cred.length) {
-    const amt = Math.min(debt[i].bal, cred[j].bal);
-    if (amt > 0) out.push({ from: debt[i].name, to: cred[j].name, amount: amt });
-    debt[i].bal -= amt; cred[j].bal -= amt;
-    if (debt[i].bal === 0) i++;
-    if (cred[j].bal === 0) j++;
-  }
-  return out;
-}
 const hue = (name) => [...keyOf(name)].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 7);
-const avatar = (name) => `<span class="avatar" style="background:hsl(${hue(name)} 55% 50%)">${esc((name || "?").trim()[0]?.toUpperCase() || "?")}</span>`;
+const avatarUrl = (name) => { const p = profileMap.get(keyOf(name)); return p?.avatarId ? `/api/img/${encodeURIComponent(auth.slug)}/${p.avatarId}` : ""; };
+const avatar = (name, cls = "") => {
+  const url = avatarUrl(name);
+  return url
+    ? `<span class="avatar ${cls}"><img src="${url}" alt="" loading="lazy"></span>`
+    : `<span class="avatar ${cls}" style="background:hsl(${hue(name)} 55% 50%)">${esc((name || "?").trim()[0]?.toUpperCase() || "?")}</span>`;
+};
 const reEsc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 function linkify(s) {
   let h = esc(s).replace(/(https?:\/\/[^\s<]+[^\s<.,;:!?)\]'"])/g, '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>');
@@ -360,14 +335,13 @@ function render() {
   document.querySelectorAll(".tab").forEach((t) => t.setAttribute("aria-selected", t.dataset.tab === tab));
   $("#fab").innerHTML = I.plus + { events: "Termin", polls: "Abstimmung", costs: "Ausgabe", board: "" }[tab];
   $("#fab").hidden = tab === "board";
-  if (tab === "board" && loaded) {
-    const newest = boardNewest();
-    if (newest > boardSeen) { boardSeen = newest; store.set(seenKey(), boardSeen); }
-  }
-  const boardNew = boardSeen ? boardActivity().filter((a) => a.at > boardSeen && keyOf(a.name) !== me).length : 0;
-  const myBal = balances().find((b) => keyOf(b.name) === me)?.bal || 0;
+  document.body.classList.toggle("chat-mode", tab === "board");
+  $("#chat-composer").hidden = tab !== "board";
+  if (tab === "board") chatMarkSeen();
+  const boardNew = chatUnread();
+  const myBills = costShares().filter((s) => s.open > 0 && keyOf(s.debtor) === me).length;
   $("#badge-board").hidden = !boardNew; $("#badge-board").textContent = boardNew;
-  $("#badge-costs").hidden = myBal >= 0; $("#badge-costs").textContent = "€";
+  $("#badge-costs").hidden = !myBills; $("#badge-costs").textContent = myBills;
 
   const upcoming = state.events.filter((e) => e.date >= today).sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
   const past = state.events.filter((e) => e.date < today).sort((a, b) => (b.date + b.time).localeCompare(a.date + a.time));
@@ -391,7 +365,7 @@ function render() {
       if (showPast) html += `<div class="list">${past.map((e) => eventCard(e, true)).join("")}</div>`;
     }
   } else if (tab === "board") {
-    html += renderBoard();
+    html += renderChat();
   } else if (tab === "costs") {
     html += renderCosts();
   } else {
@@ -407,7 +381,9 @@ function render() {
   // Eingaben in Kommentarfeldern beim Neuzeichnen erhalten
   const drafts = {};
   document.querySelectorAll("#main [data-draft]").forEach((i) => (drafts[i.dataset.draft] = i.value));
+  const atBottom = tab === "board" && chatAtBottom();
   $("#main").innerHTML = html;
+  if (tab === "board") chatAfterRender(atBottom);
   for (const [k, v] of Object.entries(drafts)) { const i = document.querySelector(`#main [data-draft="${k}"]`); if (i) i.value = v; }
 }
 
@@ -546,8 +522,7 @@ $("#main").addEventListener("click", (ev) => {
       return run(async () => upsert("events", await api("POST", `events/${id}/rsvp`, { status: next, note: e.rsvps?.[me]?.note || "" })));
     }
     case "del-comment": {
-      const kind = card.dataset.type === "post" ? "posts" : "events";
-      return run(async () => upsert(kind, await api("DELETE", `${kind}/${id}/comments/${el.dataset.cid}`)));
+      return run(async () => upsert("events", await api("DELETE", `events/${id}/comments/${el.dataset.cid}`)));
     }
     case "ics": return downloadIcs(e);
     case "share": return share(e ? eventText(e) : pollText(p));
@@ -587,9 +562,6 @@ $("#main").addEventListener("submit", (ev) => {
   if (action === "comment") {
     const text = f.text.value.trim(); if (!text) return;
     run(async () => { upsert("events", await api("POST", `events/${id}/comments`, { text })); clear(); });
-  } else if (action === "post-comment") {
-    const text = f.text.value.trim(); if (!text) return;
-    run(async () => { upsert("posts", await api("POST", `posts/${id}/comments`, { text })); clear(); });
   } else if (action === "note") {
     run(async () => { upsert("events", await api("POST", `events/${id}/rsvp`, { status: e.rsvps[keyOf(auth.name)].status, note: f.note.value })); toast("Notiz gespeichert"); });
   } else if (action === "add-option") {
@@ -712,48 +684,8 @@ async function share(text) {
   catch { toast("Kopieren nicht möglich"); }
 }
 
-/* ---------- Pinnwand ---------- */
-const boardActivity = () => (state.posts || []).flatMap((p) => [{ at: p.createdAt, name: p.createdBy }, ...(p.comments || []).map((c) => ({ at: c.at, name: c.name }))]);
-const boardNewest = () => boardActivity().reduce((m, a) => (a.at > m ? a.at : m), "");
+/* ---------- Kommentare (Termine) ---------- */
 const commentHtml = (c, me, base) => `<div class="comment"><div class="head"><b>${esc(c.name)}</b>${ago(c.at)}${keyOf(c.name) === me || adminPw ? `<button data-action="del-comment" data-cid="${c.id}">löschen</button>` : ""}</div><p>${linkify(c.text)}</p>${reactBar(c, `${base}/comments/${c.id}`, true)}</div>`;
-function renderBoard() {
-  const posts = [...state.posts].sort((a, b) => (b.pinned - a.pinned) || b.createdAt.localeCompare(a.createdAt));
-  let h = `<form class="card composer" id="composer">
-    <textarea name="text" maxlength="3000" data-draft="composer" data-mention placeholder="Was gibt's Neues? Idee, Link, Foto … (@Name erwähnt jemanden)"></textarea>
-    ${composerImage ? `<div class="thumb"><img src="${composerImage}" alt="Vorschau"><button type="button" data-action="rm-image" aria-label="Foto entfernen">${I.x}</button></div>` : ""}
-    <div class="composer-row">
-      <label class="btn small">${I.camera}Foto<input type="file" accept="image/*" id="photo-input" hidden></label>
-      <span class="grow"></span>
-      <button class="btn primary small">Posten</button>
-    </div>
-  </form>`;
-  h += posts.length
-    ? `<div class="list" style="margin-top:12px">${posts.map(postCard).join("")}</div>`
-    : `<div class="empty" style="margin-top:12px"><p>Noch nichts an der Pinnwand. Teilt Ideen, Links oder Fotos mit der Gruppe.</p></div>`;
-  return h;
-}
-
-function postCard(p) {
-  const me = keyOf(auth.name);
-  const cs = p.comments || [];
-  const open = expanded.has(p.id);
-  return `<article class="card post ${p.pinned ? "pinned" : ""}" data-type="post" data-id="${p.id}">
-    <div class="head">${avatar(p.createdBy)}<div class="who"><b>${esc(p.createdBy)}</b><span>${ago(p.createdAt)}</span></div>${p.pinned ? '<span class="tag todo">Angepinnt</span>' : ""}</div>
-    ${p.text ? `<p class="text">${linkify(p.text)}</p>` : ""}
-    ${p.imageId ? `<a class="photo" href="/api/img/${esc(auth.slug)}/${p.imageId}" target="_blank" rel="noopener"><img src="/api/img/${esc(auth.slug)}/${p.imageId}" alt="Foto von ${esc(p.createdBy)}" loading="lazy"></a>` : ""}
-    <div class="post-foot">
-      ${reactBar(p, `posts/${p.id}`)}
-      <button class="btn small" data-action="expand" aria-expanded="${open}">${I.chat}${cs.length ? cs.length + (cs.length === 1 ? " Antwort" : " Antworten") : "Antworten"}</button>
-      <span class="spacer"></span>
-      <button class="icon-btn pin ${p.pinned ? "on" : ""}" data-action="pin-post" aria-pressed="${!!p.pinned}" aria-label="${p.pinned ? "Nicht mehr anpinnen" : "Anpinnen"}" title="${p.pinned ? "Lösen" : "Anpinnen"}">${I.tack}</button>
-      ${canManage(p) ? `<button class="icon-btn" data-action="del-post" aria-label="Beitrag löschen" title="Löschen">${I.trash}</button>` : ""}
-    </div>
-    ${open
-      ? `<div class="comments">${cs.map((c) => commentHtml(c, me, `posts/${p.id}`)).join("")}
-          <form class="inline-form" data-action="post-comment"><input type="text" name="text" maxlength="1000" data-draft="pc-${p.id}" data-mention placeholder="Antworten… (@ für Erwähnung)" required><button class="btn small primary">Senden</button></form></div>`
-      : cs.length ? `<div class="reply-preview"><b>${esc(cs[cs.length - 1].name)}:</b> ${esc(cs[cs.length - 1].text.slice(0, 140))}${cs[cs.length - 1].text.length > 140 ? "…" : ""}</div>` : ""}
-  </article>`;
-}
 
 async function resizeImage(file, max = 1600) {
   let src = await createImageBitmap(file, { imageOrientation: "from-image" }).catch(() => null);
@@ -771,79 +703,160 @@ async function resizeImage(file, max = 1600) {
   return url;
 }
 
-$("#main").addEventListener("change", async (ev) => {
-  if (ev.target.id !== "photo-input" || !ev.target.files[0]) return;
-  try { composerImage = await resizeImage(ev.target.files[0]); render(); }
-  catch (e) { toast(e.message); }
-});
-
-$("#main").addEventListener("submit", async (ev) => {
-  if (ev.target.id !== "composer") return;
-  ev.preventDefault();
-  const f = ev.target;
-  const text = f.text.value.trim();
-  if (!text && !composerImage) return toast("Schreib etwas oder füge ein Foto hinzu.");
-  const btn = f.querySelector("button.primary");
-  btn.disabled = true; btn.textContent = "Wird gepostet…";
-  try {
-    upsert("posts", await api("POST", "posts", { text, image: composerImage }));
-    composerImage = null; f.text.value = "";
-    render();
-  } catch (e) { toast(e.message); btn.disabled = false; btn.textContent = "Posten"; }
-});
-
 /* ---------- Kosten ---------- */
+/* Kosten: jeder sieht nur, was ihn betrifft – offene Rechnungen, Forderungen, Erledigtes */
+let costView = "open"; // "open" | "done"
+let showMyExpenses = false;
+
+// Alle Anteile: wer schuldet wem wie viel (nach Zahlungen und alten "Ausgleich"-Buchungen)
+function costShares() {
+  const list = [];
+  const exps = [...state.expenses].sort((a, b) => (a.date + a.createdAt).localeCompare(b.date + b.createdAt));
+  for (const x of exps) {
+    if (x.type === "transfer") continue;
+    const parts = splitCents(x.amount, x.participants.length);
+    x.participants.forEach((p, i) => {
+      if (keyOf(p) === keyOf(x.paidBy)) return;
+      const pay = x.paid?.[keyOf(p)];
+      const paidAmt = pay ? pay.amount ?? parts[i] : 0;
+      list.push({ x, debtor: p, creditor: x.paidBy, share: parts[i], open: Math.max(0, parts[i] - paidAmt), pay, via: pay?.via || "" });
+    });
+  }
+  // Alte "Ausgleich"-Buchungen (frühere Version) der Reihe nach auf offene Anteile verteilen
+  for (const t of exps.filter((x) => x.type === "transfer")) {
+    let rest = t.amount;
+    for (const sh of list) {
+      if (!rest) break;
+      if (sh.open > 0 && keyOf(sh.debtor) === keyOf(t.paidBy) && keyOf(sh.creditor) === keyOf(t.participants[0])) {
+        const use = Math.min(rest, sh.open);
+        sh.open -= use; rest -= use;
+        if (!sh.open) { sh.doneAt = t.createdAt; sh.via ||= "Ausgleich"; }
+      }
+    }
+  }
+  for (const sh of list) if (!sh.open && !sh.doneAt) sh.doneAt = sh.pay?.at || sh.x.createdAt;
+  return list;
+}
+const sumOpen = (l) => l.reduce((a, x) => a + x.open, 0);
+function groupBy(list, field) {
+  const m = new Map();
+  for (const x of list) {
+    const k = keyOf(x[field]);
+    if (!m.has(k)) m.set(k, { name: x[field], items: [] });
+    m.get(k).items.push(x);
+  }
+  return [...m.values()].sort((a, b) => sumOpen(b.items) - sumOpen(a.items));
+}
+function myCostData() {
+  const me = keyOf(auth.name);
+  const all = costShares().filter((x) => keyOf(x.debtor) === me || keyOf(x.creditor) === me);
+  return {
+    iOwe: all.filter((x) => keyOf(x.debtor) === me && x.open > 0),
+    owedMe: all.filter((x) => keyOf(x.creditor) === me && x.open > 0),
+    done: all.filter((x) => x.open === 0).sort((a, b) => (b.doneAt || "").localeCompare(a.doneAt || "")),
+  };
+}
+
+function shareRow(sh, dir) {
+  const ev = sh.x.eventId && state.events.find((e) => e.id === sh.x.eventId);
+  const n = sh.x.participants.length;
+  const info = [fmtLong(sh.x.date), ev ? esc(ev.title) : "", n > 1 ? `${money(sh.x.amount)} ÷ ${n}` : "", sh.open < sh.share ? `${money(sh.share - sh.open)} schon beglichen` : ""].filter(Boolean).join(" · ");
+  return `<div class="row share">
+    <div class="grow"><b>${esc(sh.x.title)}</b><span>${info}</span></div>
+    <span class="amt">${money(sh.open)}</span>
+    <button class="btn small" data-action="cost-pay" data-kind="${dir === "owe" ? "paid" : "received"}" data-xid="${sh.x.id}" data-name="${esc(sh.debtor)}" data-amount="${sh.open}">${dir === "owe" ? "Bezahlt" : "Erhalten"}</button>
+  </div>`;
+}
+
 function renderCosts() {
   const me = keyOf(auth.name);
-  const exps = [...state.expenses].sort((a, b) => (b.date + b.createdAt).localeCompare(a.date + a.createdAt));
-  if (!exps.length) {
-    return `<div class="empty"><p>Noch keine Ausgaben. Wer etwas für die Gruppe bezahlt hat, trägt es hier ein – die App rechnet aus, wer wem was schuldet.</p><button class="btn primary" data-action="new-expense">${I.plus}Erste Ausgabe eintragen</button></div>`;
-  }
-  const bals = balances().filter((b) => b.bal || b.paid || b.share).sort((a, b) => b.bal - a.bal);
-  const myBal = bals.find((b) => keyOf(b.name) === me)?.bal || 0;
-  const transfers = settleUp(bals);
-  const total = exps.filter((x) => x.type !== "transfer").reduce((s, x) => s + x.amount, 0);
-  const sign = (c) => (c > 0 ? "+" : "") + money(c);
-  const cls = (c) => (c > 0 ? "pos" : c < 0 ? "neg" : "");
+  const { iOwe, owedMe, done } = myCostData();
+  const myExps = state.expenses.filter((x) => x.type !== "transfer" && (keyOf(x.paidBy) === me || keyOf(x.createdBy) === me))
+    .sort((a, b) => (b.date + b.createdAt).localeCompare(a.date + a.createdAt));
+  const oweGroups = groupBy(iOwe, "creditor"), owedGroups = groupBy(owedMe, "debtor");
+  const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 
-  let h = `<div class="card summary">
-    <span class="lbl">Dein Stand</span>
-    <span class="big ${cls(myBal)}">${sign(myBal)}</span>
-    <span class="sub">${myBal > 0 ? "Du bekommst noch Geld." : myBal < 0 ? "Du musst noch etwas zahlen." : "Du bist quitt."} · Gesamt ausgegeben: ${money(total)}</span>
+  let h = `<div class="card cost-sum">
+    <div><span>Du bekommst</span><b class="${owedMe.length ? "pos" : ""}">${money(sumOpen(owedMe))}</b><small>${owedGroups.length ? "von " + plural(owedGroups.length, "Person", "Personen") : "keine Forderungen"}</small></div>
+    <div><span>Du schuldest</span><b class="${iOwe.length ? "neg" : ""}">${money(sumOpen(iOwe))}</b><small>${oweGroups.length ? "an " + plural(oweGroups.length, "Person", "Personen") : "alles bezahlt"}</small></div>
+  </div>
+  <div class="seg cost-seg">
+    <button data-action="cost-view" data-v="open" aria-pressed="${costView === "open"}">Offen (${iOwe.length + owedMe.length})</button>
+    <button data-action="cost-view" data-v="done" aria-pressed="${costView === "done"}">Erledigt (${done.length})</button>
   </div>`;
 
-  h += `<div class="section-title">So wird ausgeglichen</div>`;
-  h += transfers.length
-    ? `<div class="card rows">${transfers.map((t) => `<div class="row">
-        <div class="transfer"><b>${esc(t.from)}</b><span class="arrow">→</span><b>${esc(t.to)}</b></div>
-        <span class="amt">${money(t.amount)}</span>
-        <button class="btn small" data-action="settle" data-from="${esc(t.from)}" data-to="${esc(t.to)}" data-amount="${t.amount}">Bezahlt</button>
-      </div>`).join("")}</div>`
-    : `<div class="card muted" style="text-align:center">Alle sind quitt.</div>`;
+  if (costView === "done") {
+    h += done.length
+      ? `<div class="card rows">${done.map((sh) => {
+          const outgoing = keyOf(sh.debtor) === me;
+          const how = sh.via === "Verrechnung" ? "verrechnet" : sh.via === "Ausgleich" ? "ausgeglichen" : outgoing ? "bezahlt" : "erhalten";
+          return `<div class="row share done">
+            ${avatar(outgoing ? sh.creditor : sh.debtor)}
+            <div class="grow"><b>${outgoing ? `Du → ${esc(sh.creditor)}` : `${esc(sh.debtor)} → dir`}</b><span>${esc(sh.x.title)} · ${how} ${sh.doneAt ? ago(sh.doneAt) : ""}</span></div>
+            <span class="amt ${outgoing ? "" : "pos"}">${money(sh.share)}</span>
+            ${sh.pay ? `<button class="btn small ghost" data-action="cost-unpay" data-xid="${sh.x.id}" data-name="${esc(sh.debtor)}">Rückgängig</button>` : ""}
+          </div>`;
+        }).join("")}</div>`
+      : `<div class="empty"><p>Noch nichts erledigt.</p></div>`;
+    return h;
+  }
 
-  h += `<div class="section-title">Salden</div><div class="card rows">${bals.map((b) => `<div class="row">
-      ${avatar(b.name)}<div class="grow"><b>${esc(b.name)}${keyOf(b.name) === me ? " (du)" : ""}</b><span>bezahlt ${money(b.paid)} · Anteil ${money(b.share)}</span></div>
-      <span class="amt ${cls(b.bal)}">${sign(b.bal)}</span></div>`).join("")}</div>`;
+  if (!iOwe.length && !owedMe.length) {
+    h += `<div class="empty"><p><b>Alles beglichen.</b><br>Du schuldest niemandem etwas und niemand dir.</p><button class="btn primary" data-action="new-expense">${I.plus}Ausgabe eintragen</button></div>`;
+  }
 
-  const shown = showAllExpenses ? exps : exps.slice(0, 15);
-  h += `<div class="section-title">Ausgaben (${exps.length})</div><div class="card rows">${shown.map(expenseRow).join("")}</div>`;
-  if (exps.length > 15) h += `<div style="text-align:center;margin-top:8px"><button class="btn small ghost" data-action="toggle-expenses">${showAllExpenses ? "Weniger anzeigen" : "Alle anzeigen"}</button></div>`;
+  if (oweGroups.length) {
+    h += `<div class="section-title">Offene Rechnungen · du zahlst</div><div class="list">`;
+    for (const g of oweGroups) {
+      const theyOwe = sumOpen(owedMe.filter((x) => keyOf(x.debtor) === keyOf(g.name)));
+      h += `<div class="card person-card" data-name="${esc(g.name)}">
+        <div class="pc-head">${avatar(g.name)}<div class="grow"><b>an ${esc(g.name)}</b><span>${plural(g.items.length, "Posten", "Posten")}</span></div>
+          <span class="amt neg">${money(sumOpen(g.items))}</span></div>
+        ${theyOwe ? `<div class="offset-note">${esc(g.name)} schuldet dir auch ${money(theyOwe)}. <button class="btn small" data-action="cost-offset" data-name="${esc(g.name)}">Gegenrechnen</button></div>` : ""}
+        <div class="rows">${g.items.map((sh) => shareRow(sh, "owe")).join("")}</div>
+        ${g.items.length > 1 ? `<div class="pc-foot"><button class="btn small primary" data-action="cost-pay-all" data-kind="paid" data-name="${esc(g.name)}">Alles bezahlt (${money(sumOpen(g.items))})</button></div>` : ""}
+      </div>`;
+    }
+    h += `</div>`;
+  }
+
+  if (owedGroups.length) {
+    h += `<div class="section-title">Forderungen · du bekommst</div><div class="list">`;
+    for (const g of owedGroups) {
+      h += `<div class="card person-card" data-name="${esc(g.name)}">
+        <div class="pc-head">${avatar(g.name)}<div class="grow"><b>${esc(g.name)}</b><span>${plural(g.items.length, "Posten", "Posten")}</span></div>
+          <span class="amt pos">${money(sumOpen(g.items))}</span></div>
+        <div class="rows">${g.items.map((sh) => shareRow(sh, "owed")).join("")}</div>
+        <div class="pc-foot">
+          <button class="btn small" data-action="cost-remind" data-name="${esc(g.name)}" data-amount="${sumOpen(g.items)}">${I.bell} Erinnern</button>
+          ${g.items.length > 1 ? `<button class="btn small primary" data-action="cost-pay-all" data-kind="received" data-name="${esc(g.name)}">Alles erhalten</button>` : ""}
+        </div>
+      </div>`;
+    }
+    h += `</div>`;
+  }
+
+  if (myExps.length) {
+    const openMine = myExps.filter((x) => costShares().some((sh) => sh.x.id === x.id && sh.open > 0));
+    const list = showMyExpenses ? myExps : openMine;
+    h += `<div class="section-title">Deine Ausgaben (${myExps.length})
+      <button class="btn small ghost" data-action="toggle-myexp">${showMyExpenses ? "Nur offene" : "Alle anzeigen"}</button></div>`;
+    h += list.length ? `<div class="card rows">${list.map(myExpenseRow).join("")}</div>` : `<p class="hint">Alle deine Ausgaben sind beglichen.</p>`;
+  }
   return h;
 }
 
-function expenseRow(x) {
+function myExpenseRow(x) {
+  const shs = costShares().filter((sh) => sh.x.id === x.id);
+  const paid = shs.filter((sh) => sh.open === 0).length;
+  const status = shs.length ? `${paid} von ${shs.length} bezahlt` : "nur für dich";
   const ev = x.eventId && state.events.find((e) => e.id === x.eventId);
-  const n = x.participants.length;
-  const isT = x.type === "transfer";
-  const sub = isT
-    ? `${esc(x.paidBy)} → ${esc(x.participants[0])} · ${fmtLong(x.date)}`
-    : [`${esc(x.paidBy)} hat bezahlt`, n === 1 ? `für ${esc(x.participants[0])}` : `${n} Pers. à ${money(Math.round(x.amount / n))}`, fmtLong(x.date), ev ? esc(ev.title) : "", x.note ? esc(x.note) : ""].filter(Boolean).join(" · ");
+  const payer = keyOf(x.paidBy) === keyOf(auth.name) ? "du" : esc(x.paidBy);
   return `<div class="row" data-type="expense" data-id="${x.id}">
-    ${isT ? `<span class="avatar" style="background:var(--yes)">✓</span>` : avatar(x.paidBy)}
-    <div class="grow"><b>${esc(x.title)}</b><span>${sub}</span></div>
+    <div class="grow"><b>${esc(x.title)}</b><span>${payer} bezahlt · ${fmtLong(x.date)}${ev ? " · " + esc(ev.title) : ""} · <span class="${paid === shs.length ? "pos" : ""}">${status}</span></span></div>
     <span class="amt">${money(x.amount)}</span>
-    ${canManage(x) && !isT ? `<button class="icon-btn" data-action="edit-expense" aria-label="Bearbeiten">${I.edit}</button>` : ""}
-    ${canManage(x) ? `<button class="icon-btn" data-action="del-expense" aria-label="Löschen">${I.trash}</button>` : ""}
+    ${canManage(x) ? `<button class="icon-btn" data-action="edit-expense" aria-label="Bearbeiten">${I.edit}</button>
+    <button class="icon-btn" data-action="del-expense" aria-label="Löschen">${I.trash}</button>` : ""}
   </div>`;
 }
 
@@ -940,10 +953,8 @@ $("#main").addEventListener("click", (ev) => {
   const el = ev.target.closest("[data-action]");
   if (!el) return;
   const id = el.closest("[data-id]")?.dataset.id;
-  const post = state.posts.find((x) => x.id === id);
   const x = state.expenses.find((y) => y.id === id);
   switch (el.dataset.action) {
-    case "rm-image": composerImage = null; return render();
     case "pick": {
       const k = "pick:" + el.dataset.path;
       const was = expanded.has(k);
@@ -954,27 +965,55 @@ $("#main").addEventListener("click", (ev) => {
     case "react": {
       const path = el.dataset.path;
       [...expanded].filter((x) => x.startsWith("pick:")).forEach((x) => expanded.delete(x));
-      const kind = path.startsWith("posts/") ? "posts" : "events";
-      return run(async () => upsert(kind, await api("POST", path + "/react", { emoji: el.dataset.emoji })));
+      return run(async () => upsert("events", await api("POST", path + "/react", { emoji: el.dataset.emoji })));
     }
-    case "pin-post": return run(async () => upsert("posts", await api("POST", `posts/${id}/pin`, { pinned: !post.pinned })));
-    case "del-post":
-      if (!confirm("Beitrag wirklich löschen?")) return;
-      return run(async () => { await api("DELETE", `posts/${id}`); state.posts = state.posts.filter((p) => p.id !== id); });
     case "new-expense": return openExpenseDialog();
     case "edit-expense": return openExpenseDialog(x);
-    case "toggle-expenses": showAllExpenses = !showAllExpenses; return render();
+    case "toggle-myexp": showMyExpenses = !showMyExpenses; return render();
+    case "cost-view": costView = el.dataset.v; return render();
+    case "cost-pay": {
+      const kind = el.dataset.kind;
+      return run(async () => {
+        state.expenses = (await api("POST", "expenses/pay", { kind, items: [{ id: el.dataset.xid, name: el.dataset.name, amount: +el.dataset.amount }] })).expenses;
+        toast(kind === "paid" ? "Als bezahlt markiert – unter „Erledigt“ rückgängig machbar" : "Als erhalten markiert");
+      });
+    }
+    case "cost-pay-all": {
+      const kind = el.dataset.kind, other = keyOf(el.dataset.name);
+      const { iOwe, owedMe } = myCostData();
+      const items = (kind === "paid" ? iOwe.filter((sh) => keyOf(sh.creditor) === other) : owedMe.filter((sh) => keyOf(sh.debtor) === other));
+      const total = sumOpen(items);
+      if (!confirm(kind === "paid" ? `Alles an ${el.dataset.name} bezahlt (${money(total)})?` : `Alles von ${el.dataset.name} erhalten (${money(total)})?`)) return;
+      return run(async () => {
+        state.expenses = (await api("POST", "expenses/pay", { kind, items: items.map((sh) => ({ id: sh.x.id, name: sh.debtor, amount: sh.open })) })).expenses;
+        toast("Erledigt ✓");
+      });
+    }
+    case "cost-offset": {
+      const other = keyOf(el.dataset.name);
+      const { iOwe, owedMe } = myCostData();
+      const mine = iOwe.filter((sh) => keyOf(sh.creditor) === other), theirs = owedMe.filter((sh) => keyOf(sh.debtor) === other);
+      const offset = Math.min(sumOpen(mine), sumOpen(theirs));
+      const net = sumOpen(theirs) - sumOpen(mine);
+      if (!confirm(`${money(offset)} gegeneinander verrechnen?
+
+Danach ${net > 0 ? `schuldet dir ${el.dataset.name} noch ${money(net)}` : net < 0 ? `schuldest du ${el.dataset.name} noch ${money(-net)}` : "seid ihr quitt"}.`)) return;
+      const take = (list) => { let rest = offset; const out = []; for (const sh of list) { if (!rest) break; const a = Math.min(rest, sh.open); out.push({ id: sh.x.id, name: sh.debtor, amount: a }); rest -= a; } return out; };
+      return run(async () => {
+        state.expenses = (await api("POST", "expenses/pay", { kind: "offset", items: [...take(mine), ...take(theirs)] })).expenses;
+        toast("Verrechnet ✓");
+      });
+    }
+    case "cost-remind":
+      return run(async () => {
+        await api("POST", "expenses/remind", { to: el.dataset.name, amount: +el.dataset.amount });
+        toast(`Erinnerung an ${el.dataset.name} geschickt (falls Benachrichtigungen aktiv sind)`);
+      });
+    case "cost-unpay":
+      return run(async () => { upsert("expenses", await api("POST", `expenses/${el.dataset.xid}/unpay`, { name: el.dataset.name })); toast("Wieder offen"); });
     case "del-expense":
       if (!confirm(`„${x.title}“ (${money(x.amount)}) wirklich löschen?`)) return;
       return run(async () => { await api("DELETE", `expenses/${id}`); state.expenses = state.expenses.filter((y) => y.id !== id); });
-    case "settle": {
-      const { from, to, amount } = el.dataset;
-      if (!confirm(`Bestätigen: ${from} hat ${to} ${money(+amount)} gezahlt?`)) return;
-      return run(async () => {
-        upsert("expenses", await api("POST", "expenses", { type: "transfer", title: "Ausgleich", amount: +amount, paidBy: from, participants: [to], date: todayISO() }));
-        toast("Ausgleich eingetragen");
-      });
-    }
     case "event-expense": {
       const e = state.events.find((y) => y.id === id);
       const going = Object.values(e.rsvps || {}).filter((r) => r.status === "yes").map((r) => r.name);
@@ -1113,7 +1152,9 @@ function showMentions(el) {
   mbox.hidden = false;
   const r = el.getBoundingClientRect();
   mbox.style.left = Math.max(8, Math.min(r.left, innerWidth - mbox.offsetWidth - 8)) + scrollX + "px";
-  mbox.style.top = r.bottom + scrollY + 4 + "px";
+  // Liegt das Feld weit unten (z. B. Chat-Eingabe), Vorschläge darüber anzeigen
+  const above = r.bottom + mbox.offsetHeight + 8 > innerHeight;
+  mbox.style.top = (above ? r.top - mbox.offsetHeight - 6 : r.bottom + 4) + scrollY + "px";
 }
 function hideMentions() { mbox.hidden = true; mTarget = null; }
 function pickMention(i) {
@@ -1136,7 +1177,7 @@ document.addEventListener("keydown", (e) => {
 });
 mbox.addEventListener("mousedown", (e) => { e.preventDefault(); const b = e.target.closest("button"); if (b) pickMention(+b.dataset.i); });
 document.addEventListener("focusout", (e) => { if (e.target === mTarget) setTimeout(() => { if (document.activeElement !== mTarget) hideMentions(); }, 200); });
-addEventListener("scroll", () => { if (!mbox.hidden) hideMentions(); }, { passive: true });
+addEventListener("scroll", () => { if (!mbox.hidden && !mTarget?.closest?.("#chat-composer")) hideMentions(); }, { passive: true });
 
 /* ---------- Admin-Modus ---------- */
 function renderAdmin() {
@@ -1215,9 +1256,14 @@ $("#backup-list").addEventListener("click", async (ev) => {
   }
   if (rs) doRestore({ date: rs.dataset.restore }, `Backup „${backupLabel(rs.dataset.restore)}“`);
 });
-$("#backup-download").onclick = () => {
-  const { events, polls, posts, expenses } = state;
-  downloadJson({ version: 1, group: auth.slug, groupName: auth.groupName, createdAt: new Date().toISOString(), data: { events, polls, posts, expenses } }, `backup-${auth.slug}-${todayISO()}.json`);
+$("#backup-download").onclick = async () => {
+  // Aktuellen Stand auf dem Server sichern und diese vollständige Sicherung herunterladen (inkl. ganzem Chat)
+  try {
+    const { backups } = await api("POST", "backup/now");
+    const latest = backups.find((b) => /^\d{4}-\d{2}-\d{2}$/.test(b));
+    downloadJson(await api("GET", "backup/" + latest), `backup-${auth.slug}-${todayISO()}.json`);
+    loadBackups();
+  } catch (e) { toast(e.message); }
 };
 $("#backup-now").onclick = async () => {
   try { await api("POST", "backup/now"); toast("Gesichert ✔"); loadBackups(); } catch (e) { toast(e.message); }
@@ -1240,8 +1286,10 @@ setInterval(() => {
 }, 20000);
 document.addEventListener("visibilitychange", () => { if (!document.hidden && auth?.pw) refresh(); });
 
-/* ---------- Start ---------- */
+/* ---------- Start (nachdem auch chat.js geladen ist) ---------- */
+addEventListener("DOMContentLoaded", () => {
 if (inviteParam && !groups.some((g) => g.slug === slugify(inviteParam) && g.pw)) { joining = !!auth?.pw; showLogin("", { slug: slugify(inviteParam) }); }
 else if (inviteParam) { history.replaceState(null, "", location.pathname); switchGroup(slugify(inviteParam)); }
-else if (auth?.pw) { boardSeen = store.get(seenKey()) || ""; startApp(); }
+else if (auth?.pw) startApp();
 else showLogin("", { slug: auth?.slug, name: auth?.name });
+});

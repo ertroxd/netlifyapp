@@ -1,7 +1,7 @@
 // Läuft täglich um 16:00 UTC (18:00 Sommerzeit / 17:00 Winterzeit in Deutschland):
-// 1) automatisches Backup jeder Gruppe (14 Tage aufbewahrt)
+// 1) abgelaufene Stories löschen + automatisches Backup jeder Gruppe (14 Tage aufbewahrt)
 // 2) Erinnerungen an Termine von morgen und an Umfragen, die morgen enden
-import { allGroups, berlinDate, groupStore, readAll, snapshot } from "../shared/store.mjs";
+import { allGroups, berlinDate, cleanupStories, groupStore, readAll, snapshot } from "../shared/store.mjs";
 import { notify } from "../shared/push.mjs";
 
 const nk = (n) => String(n ?? "").trim().toLowerCase();
@@ -10,6 +10,7 @@ export default async () => {
   const tomorrow = berlinDate(1);
   for (const g of await allGroups()) {
     const store = groupStore(g.slug);
+    try { await cleanupStories(store); } catch (e) { console.error("stories", g.slug, e); }
     try { await snapshot(store); } catch (e) { console.error("backup", g.slug, e); }
 
     const subs = await readAll(store, "sub:");
