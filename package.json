@@ -1,0 +1,10 @@
+{
+  "name": "gruppenorganisator",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Termine & Abstimmungen für eure Gruppe – läuft auf Netlify mit Netlify Blobs.",
+  "dependencies": {
+    "@netlify/blobs": "^8.1.0"
+  }
+}

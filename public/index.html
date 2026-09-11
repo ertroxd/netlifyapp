@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#f6f4ef" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#16171b" media="(prefers-color-scheme: dark)">
+<title>Gruppenorganisator</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%23e0643a'/><rect x='7' y='9' width='18' height='16' rx='3' fill='none' stroke='white' stroke-width='2.4'/><path d='M7 14h18M12 6v5M20 6v5' stroke='white' stroke-width='2.4' stroke-linecap='round'/></svg>">
+<link rel="stylesheet" href="/app.css">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Gruppe">
+</head>
+<body>
+
+<!-- Login -->
+<section class="login" id="login" hidden>
+  <div class="card">
+    <div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round"><rect x="4" y="5" width="16" height="15" rx="3"/><path d="M4 10h16M9 3v4M15 3v4"/></svg></div>
+    <h1>Gruppenorganisator</h1>
+    <p>Termine, Umfragen, Pinnwand und Kosten – alles an einem Ort.</p>
+    <form id="login-form">
+      <label>Dein Name<input type="text" name="name" maxlength="40" autocomplete="nickname" required placeholder="z. B. Erik"></label>
+      <label>Gruppen-Passwort<input type="password" name="pw" autocomplete="current-password" required></label>
+      <p class="form-err" id="login-err" hidden></p>
+      <button class="btn primary" style="justify-content:center;padding:11px">Los geht's</button>
+    </form>
+  </div>
+</section>
+
+<!-- App -->
+<div id="app" hidden>
+  <header class="top">
+    <div class="wrap">
+      <div class="top-row">
+        <div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round"><rect x="4" y="5" width="16" height="15" rx="3"/><path d="M4 10h16M9 3v4M15 3v4"/></svg></div>
+        <h1 id="group-name">Gruppe</h1>
+        <div class="me">Hallo <b id="me-name"></b><br><button id="logout">Abmelden</button></div>
+      </div>
+    </div>
+  </header>
+  <div class="wrap">
+    <div class="install" id="install" hidden>
+      <div><b>Als App installieren</b><span id="install-text">Mit Icon auf dem Homescreen – öffnet wie eine richtige App.</span></div>
+      <button class="btn small primary" id="install-btn">Installieren</button>
+      <button class="icon-btn" id="install-close" aria-label="Schließen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+    </div>
+  </div>
+  <main class="wrap" id="main"><div class="loading">Lade…</div></main>
+  <button class="btn primary fab" id="fab"></button>
+  <nav class="bottom-nav" role="tablist">
+    <button class="tab" role="tab" data-tab="events"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="4" y="5" width="16" height="15" rx="3"/><path d="M4 10h16M9 3v4M15 3v4"/></svg><span>Termine</span><i class="badge" id="badge-events" hidden></i></button>
+    <button class="tab" role="tab" data-tab="polls"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 20V10M12 20V4M19 20v-7"/></svg><span>Umfragen</span><i class="badge" id="badge-polls" hidden></i></button>
+    <button class="tab" role="tab" data-tab="board"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4h6l-1 5 3 3H7l3-3zM12 12v8"/></svg><span>Pinnwand</span><i class="badge" id="badge-board" hidden></i></button>
+    <button class="tab" role="tab" data-tab="costs"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M17 6.5A6.5 6.5 0 1 0 17 17.5M4 10h9M4 14h9"/></svg><span>Kosten</span><i class="badge" id="badge-costs" hidden></i></button>
+  </nav>
+</div>
+
+<!-- Ausgaben-Dialog -->
+<dialog id="expense-dlg">
+  <form method="dialog" id="expense-form">
+    <h2 id="expense-dlg-title">Neue Ausgabe</h2>
+    <label>Wofür?<input type="text" name="title" maxlength="120" required placeholder="z. B. Getränke & Kohle"></label>
+    <div class="grid2">
+      <label>Betrag (€)<input type="text" name="amount" inputmode="decimal" required placeholder="0,00" autocomplete="off"></label>
+      <label>Datum<input type="date" name="date" required></label>
+    </div>
+    <label>Bezahlt von<select name="paidBy"></select></label>
+    <div>
+      <div class="split-head"><label>Aufgeteilt auf</label><span class="split-tools"><button type="button" class="btn small ghost" id="split-all">Alle</button><button type="button" class="btn small ghost" id="split-none">Keine</button></span></div>
+      <div class="pick" id="split-people"></div>
+      <div class="inline-form" style="margin-top:8px"><input type="text" id="split-new" maxlength="40" placeholder="Weitere Person hinzufügen"><button type="button" class="btn small" id="split-add">+</button></div>
+      <p class="hint" id="split-info"></p>
+    </div>
+    <label>Gehört zu Termin (optional)<select name="eventId"></select></label>
+    <label>Notiz<input type="text" name="note" maxlength="300" placeholder="optional"></label>
+    <p class="form-err" hidden></p>
+    <div class="dlg-foot">
+      <button type="button" class="btn ghost" data-close>Abbrechen</button>
+      <button class="btn primary" value="save">Speichern</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- iOS-Installationshinweis -->
+<dialog id="ios-dlg">
+  <form method="dialog">
+    <h2>Auf dem iPhone installieren</h2>
+    <ol class="steps">
+      <li>Diese Seite in <b>Safari</b> öffnen.</li>
+      <li>Unten auf <b>Teilen</b> tippen (Quadrat mit Pfeil nach oben).</li>
+      <li><b>„Zum Home-Bildschirm“</b> wählen und bestätigen.</li>
+    </ol>
+    <div class="dlg-foot"><button class="btn primary">Verstanden</button></div>
+  </form>
+</dialog>
+
+<!-- Termin-Dialog -->
+<dialog id="event-dlg">
+  <form method="dialog" id="event-form">
+    <h2 id="event-dlg-title">Neuer Termin</h2>
+    <label>Titel<input type="text" name="title" maxlength="120" required placeholder="z. B. Grillabend"></label>
+    <div class="grid3">
+      <label>Datum<input type="date" name="date" required></label>
+      <label>Beginn<input type="time" name="time"></label>
+      <label>Ende<input type="time" name="endTime"></label>
+    </div>
+    <label>Ort<input type="text" name="location" maxlength="200" placeholder="optional"></label>
+    <label>Beschreibung<textarea name="description" maxlength="3000" placeholder="Was ist geplant, was mitbringen …"></textarea></label>
+    <p class="form-err" hidden></p>
+    <div class="dlg-foot">
+      <button type="button" class="btn ghost" data-close>Abbrechen</button>
+      <button class="btn primary" value="save">Speichern</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- Abstimmungs-Dialog -->
+<dialog id="poll-dlg">
+  <form method="dialog" id="poll-form">
+    <h2>Neue Abstimmung</h2>
+    <div class="seg" id="poll-kind">
+      <button type="button" data-kind="text" aria-pressed="true">Freie Antworten</button>
+      <button type="button" data-kind="date" aria-pressed="false">Terminfindung</button>
+    </div>
+    <label>Frage<input type="text" name="title" maxlength="150" required placeholder="z. B. Wohin geht der Ausflug?"></label>
+    <label>Beschreibung<textarea name="description" maxlength="2000" placeholder="optional" style="min-height:60px"></textarea></label>
+    <div>
+      <label style="margin-bottom:6px">Antwortmöglichkeiten</label>
+      <div class="opt-rows" id="opt-rows"></div>
+      <button type="button" class="btn small ghost" id="add-opt-row" style="margin-top:6px">+ Weitere Option</button>
+    </div>
+    <div style="display:grid;gap:8px">
+      <label class="check-row"><input type="checkbox" name="multi" checked> Mehrfachauswahl erlauben</label>
+      <label class="check-row"><input type="checkbox" name="allowAdd"> Alle dürfen Optionen ergänzen</label>
+    </div>
+    <label style="max-width:220px">Abstimmen bis (optional)<input type="date" name="deadline"></label>
+    <p class="form-err" hidden></p>
+    <div class="dlg-foot">
+      <button type="button" class="btn ghost" data-close>Abbrechen</button>
+      <button class="btn primary" value="save">Erstellen</button>
+    </div>
+  </form>
+</dialog>
+
+<div class="toast" id="toast" hidden></div>
+
+<script src="/app.js"></script>
+</body>
+</html>
