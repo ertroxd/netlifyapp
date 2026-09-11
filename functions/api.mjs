@@ -2,7 +2,7 @@
 // Alle Routen liegen unter /api/* und brauchen den Header "x-group-password".
 
 import { randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
-import { MAIN, slugOk, metaStore, groupStore, readAll, DATA_PREFIXES, listBackups, restore, snapshot } from "../shared/store.mjs";
+import { MAIN, slugOk, metaStore, groupStore, readAll, DATA_PREFIXES, listBackups, restore, snapshot, mainGroupName } from "../shared/store.mjs";
 import { notify, subKey, vapidKeys } from "../shared/push.mjs";
 
 class HttpError extends Error {
@@ -106,7 +106,7 @@ async function resolveGroup(slug) {
   if (slug === MAIN) {
     const pw = process.env.GROUP_PASSWORD;
     if (!pw) throw new HttpError(500, "GROUP_PASSWORD ist in Netlify noch nicht gesetzt.");
-    return { slug, name: process.env.GROUP_NAME || "Unsere Gruppe", check: (given) => passwordOk(given, pw) };
+    return { slug, name: await mainGroupName(), check: (given) => passwordOk(given, pw) };
   }
   const g = slugOk(slug) ? await metaStore().get(`group:${slug}`, { type: "json" }) : null;
   if (!g) throw new HttpError(404, "Gruppe nicht gefunden – bitte den Code prüfen.");
@@ -121,10 +121,10 @@ function addComment(item, user, text) {
   item.comments.push({ id: randomUUID(), name: user, text, at: new Date().toISOString() });
   if (item.comments.length > 300) item.comments = item.comments.slice(-300);
 }
-function deleteComment(item, user, cid) {
+function deleteComment(item, user, cid, admin = false) {
   const c = (item.comments || []).find((c) => c.id === cid);
   if (!c) throw new HttpError(404, "Kommentar nicht gefunden.");
-  if (nameKey(c.name) !== nameKey(user)) throw new HttpError(403, "Nur eigene Kommentare löschen.");
+  if (nameKey(c.name) !== nameKey(user) && !admin) throw new HttpError(403, "Nur eigene Kommentare löschen.");
   item.comments = item.comments.filter((c) => c.id !== cid);
 }
 
@@ -147,6 +147,22 @@ function findComment(item, cid) {
   const c = (item.comments || []).find((c) => c.id === cid);
   if (!c) throw new HttpError(404, "Kommentar nicht gefunden.");
   return c;
+}
+
+const isAdmin = (req) => {
+  const admin = process.env.ADMIN_PASSWORD || process.env.GROUP_PASSWORD;
+  return !!admin && passwordOk(req.headers.get("x-admin-password"), admin);
+};
+// Nur wer etwas erstellt hat (oder ein Admin) darf es ändern/löschen
+function assertOwner(item, user, req) {
+  if (nameKey(item.createdBy) !== nameKey(user) && !isAdmin(req))
+    throw new HttpError(403, `Nur ${item.createdBy || "der Ersteller"} (oder ein Admin) darf das ändern oder löschen.`);
+}
+async function deleteOwned(store, key, user, req) {
+  const item = await store.get(key, { type: "json" });
+  if (!item) return; // schon weg
+  assertOwner(item, user, req);
+  await store.delete(key);
 }
 
 const adminOk = (req) => {
@@ -212,6 +228,16 @@ export default async (req) => {
     const body = ["POST", "PUT", "PATCH", "DELETE"].includes(method) ? await req.json().catch(() => ({})) : {};
 
     if (res === "login" && method === "POST") return json({ ok: true, groupName, slug: group.slug });
+    if (res === "admin" && id === "check" && method === "POST") { adminOk(req); return json({ ok: true }); }
+    if (res === "admin" && id === "rename" && method === "POST") {
+      adminOk(req);
+      const name = str(body.name, 60);
+      if (!name) throw new HttpError(400, "Bitte einen Namen angeben.");
+      const m = metaStore();
+      if (group.slug === MAIN) await m.setJSON("main-name", { name, updatedAt: new Date().toISOString(), by: user });
+      else await mutate(m, `group:${group.slug}`, (g) => { g.name = name; });
+      return json({ ok: true, groupName: name });
+    }
 
     if (res === "state" && method === "GET") {
       const [events, polls, posts, expenses] = await Promise.all(
@@ -303,10 +329,11 @@ export default async (req) => {
         return json(item, 201);
       }
       if (id && !sub && method === "PUT") {
-        return json(await mutate(store, key, (e) => Object.assign(e, eventFields(body))));
+        const fields = eventFields(body);
+        return json(await mutate(store, key, (e) => { assertOwner(e, user, req); Object.assign(e, fields); }));
       }
       if (id && !sub && method === "DELETE") {
-        await store.delete(key);
+        await deleteOwned(store, key, user, req);
         return json({ ok: true });
       }
       if (id && sub === "rsvp" && method === "POST") {
@@ -333,7 +360,7 @@ export default async (req) => {
         return json(await mutate(store, key, (e) => toggleReaction(findComment(e, subId), user, body.emoji)));
       }
       if (id && sub === "comments" && subId && method === "DELETE") {
-        return json(await mutate(store, key, (e) => deleteComment(e, user, subId)));
+        return json(await mutate(store, key, (e) => deleteComment(e, user, subId, isAdmin(req))));
       }
     }
 
@@ -374,7 +401,7 @@ export default async (req) => {
         return json(item, 201);
       }
       if (id && !sub && method === "DELETE") {
-        await store.delete(key);
+        await deleteOwned(store, key, user, req);
         return json({ ok: true });
       }
       if (id && sub === "vote" && method === "POST") {
@@ -407,6 +434,7 @@ export default async (req) => {
       if (id && sub === "close" && method === "POST") {
         return json(
           await mutate(store, key, (p) => {
+            assertOwner(p, user, req);
             p.closed = !!body.closed;
             if (!p.closed && p.deadline && p.deadline < todayUTC()) p.deadline = "";
           })
@@ -449,7 +477,7 @@ export default async (req) => {
       }
       if (id && !sub && method === "DELETE") {
         // Foto bleibt gespeichert, damit ein Backup den Beitrag vollständig wiederherstellen kann
-        await store.delete(key);
+        await deleteOwned(store, key, user, req);
         return json({ ok: true });
       }
       if (id && sub === "like" && method === "POST") { // alte App-Version
@@ -471,7 +499,7 @@ export default async (req) => {
         return json(await mutate(store, key, (p) => toggleReaction(findComment(p, subId), user, body.emoji)));
       }
       if (id && sub === "comments" && subId && method === "DELETE") {
-        return json(await mutate(store, key, (p) => deleteComment(p, user, subId)));
+        return json(await mutate(store, key, (p) => deleteComment(p, user, subId, isAdmin(req))));
       }
       if (id && sub === "pin" && method === "POST") {
         return json(await mutate(store, key, (p) => (p.pinned = !!body.pinned)));
@@ -497,10 +525,11 @@ export default async (req) => {
         return json(item, 201);
       }
       if (id && !sub && method === "PUT") {
-        return json(await mutate(store, key, (x) => Object.assign(x, expenseFields(body))));
+        const fields = expenseFields(body);
+        return json(await mutate(store, key, (x) => { assertOwner(x, user, req); Object.assign(x, fields); }));
       }
       if (id && !sub && method === "DELETE") {
-        await store.delete(key);
+        await deleteOwned(store, key, user, req);
         return json({ ok: true });
       }
     }

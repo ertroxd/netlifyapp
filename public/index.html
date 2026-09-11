@@ -39,7 +39,7 @@
       <div class="top-row">
         <div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round"><rect x="4" y="5" width="16" height="15" rx="3"/><path d="M4 10h16M9 3v4M15 3v4"/></svg></div>
         <button class="group-btn" id="group-btn" aria-haspopup="dialog"><h1 id="group-name">Gruppe</h1><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 9l6 6 6-6"/></svg></button>
-        <div class="me">Hallo <b id="me-name"></b><br><button id="logout">Gruppen</button></div>
+        <div class="me">Hallo <b id="me-name"></b> <span class="tag todo" id="me-admin" hidden>Admin</span><br><button id="logout">Gruppen</button></div>
       </div>
     </div>
   </header>
@@ -128,6 +128,15 @@
         <label class="btn small">Aus Datei wiederherstellen<input type="file" accept="application/json,.json" id="backup-file" hidden></label>
       </div>
       <div class="rows backup-list" id="backup-list"></div>
+    </section>
+
+    <section class="settings">
+      <h3>Admin-Modus</h3>
+      <p class="hint" id="admin-status"></p>
+      <div class="actions">
+        <button type="button" class="btn small" id="admin-toggle">Admin-Modus aktivieren</button>
+        <button type="button" class="btn small" id="rename-btn">Gruppe umbenennen</button>
+      </div>
     </section>
 
     <div class="actions"><button type="button" class="btn small ghost danger" id="g-leave">Aktuelle Gruppe auf diesem Gerät verlassen</button></div>

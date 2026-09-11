@@ -16,10 +16,16 @@ export async function readAll(store, prefix) {
   return items.filter(Boolean);
 }
 
+// Name der Hauptgruppe: per Admin umbenannt (gespeichert) > GROUP_NAME > Standard
+export async function mainGroupName() {
+  const o = await metaStore().get("main-name", { type: "json" });
+  return o?.name || process.env.GROUP_NAME || "Unsere Gruppe";
+}
+
 // Alle Gruppen (inkl. Hauptgruppe, falls konfiguriert)
 export async function allGroups() {
   const groups = [];
-  if (process.env.GROUP_PASSWORD) groups.push({ slug: MAIN, name: process.env.GROUP_NAME || "Unsere Gruppe" });
+  if (process.env.GROUP_PASSWORD) groups.push({ slug: MAIN, name: await mainGroupName() });
   const extra = await readAll(metaStore(), "group:");
   for (const g of extra) groups.push({ slug: g.slug, name: g.name });
   return groups;

@@ -71,6 +71,8 @@ let showPast = false, showClosed = false, showAllExpenses = false;
 let editingEventId = null;
 let pollKind = "text";
 let boardSeen = "";
+let adminPw = ""; // Admin-Modus: nur für diese Sitzung im Speicher, nie dauerhaft gespeichert
+const canManage = (x) => !!adminPw || keyOf(x?.createdBy) === keyOf(auth?.name);
 const seenKey = () => "go-board-seen:" + (auth?.slug || "main");
 let composerImage = null; // dataURL des verkleinerten Fotos
 const euro = new Intl.NumberFormat("de-DE", { style: "currency", currency: "EUR" });
@@ -85,6 +87,7 @@ async function api(method, path, body, extraHeaders = {}) {
       "x-group": auth?.slug || "main",
       "x-group-password": auth?.pw || "",
       "x-user-name": encodeURIComponent(auth?.name || ""),
+      ...(adminPw ? { "x-admin-password": adminPw } : {}),
       ...extraHeaders,
     },
     body: body ? JSON.stringify(body) : undefined,
@@ -179,6 +182,8 @@ $("#logout").onclick = () => openGroups();
 $("#group-btn").onclick = () => openGroups();
 
 function switchGroup(slug) {
+  adminPw = "";
+  $("#me-admin").hidden = true;
   auth = groups.find((g) => g.slug === slug) || auth;
   saveGroups();
   state = { events: [], polls: [], posts: [], expenses: [], groupName: auth.groupName };
@@ -191,13 +196,17 @@ function switchGroup(slug) {
 
 /* ---------- Gruppen-Dialog ---------- */
 function openGroups() {
+  renderGroupList();
+  $("#groups-dlg").showModal();
+  renderPushSettings();
+  renderAdmin();
+  loadBackups();
+}
+function renderGroupList() {
   $("#group-list").innerHTML = groups.map((g) => `<button type="button" class="group-item" data-slug="${esc(g.slug)}" aria-current="${g.slug === auth?.slug}">
       <span class="avatar" style="background:hsl(${hue(g.groupName || g.slug)} 55% 50%)">${esc((g.groupName || g.slug)[0].toUpperCase())}</span>
       <span class="grow"><b>${esc(g.groupName || g.slug)}</b><span>Code: ${esc(g.slug === "main" ? "Hauptgruppe" : g.slug)} · als ${esc(g.name)}${g.pw ? "" : " · Anmeldung nötig"}</span></span>
     </button>`).join("");
-  $("#groups-dlg").showModal();
-  renderPushSettings();
-  loadBackups();
 }
 $("#group-list").addEventListener("click", (ev) => {
   const b = ev.target.closest("[data-slug]"); if (!b) return;
@@ -445,8 +454,8 @@ function eventCard(e, isPast) {
         <div class="actions">
           <button class="btn small" data-action="ics">${I.cal}In Kalender</button>
           <button class="btn small" data-action="share">Teilen</button>
-          <button class="btn small" data-action="edit-event">Bearbeiten</button>
-          <button class="btn small ghost danger" data-action="del-event">Löschen</button>
+          ${canManage(e) ? `<button class="btn small" data-action="edit-event">Bearbeiten</button>
+          <button class="btn small ghost danger" data-action="del-event">Löschen</button>` : ""}
         </div>
         <div class="muted" style="font-size:12.5px">Erstellt von ${esc(e.createdBy)} · ${ago(e.createdAt)}</div>
       </div>` : ""}
@@ -505,8 +514,8 @@ function pollCard(p) {
       <span class="actions">
         ${p.kind === "date" && winners.length ? `<button class="btn small" data-action="poll-to-event">${I.cal}Als Termin anlegen</button>` : ""}
         <button class="btn small" data-action="share">Teilen</button>
-        <button class="btn small" data-action="toggle-close">${isOpen ? "Beenden" : "Wieder öffnen"}</button>
-        <button class="btn small ghost danger" data-action="del-poll">Löschen</button>
+        ${canManage(p) ? `<button class="btn small" data-action="toggle-close">${isOpen ? "Beenden" : "Wieder öffnen"}</button>
+        <button class="btn small ghost danger" data-action="del-poll">Löschen</button>` : ""}
       </span>
     </div>
   </article>`;
@@ -706,7 +715,7 @@ async function share(text) {
 /* ---------- Pinnwand ---------- */
 const boardActivity = () => (state.posts || []).flatMap((p) => [{ at: p.createdAt, name: p.createdBy }, ...(p.comments || []).map((c) => ({ at: c.at, name: c.name }))]);
 const boardNewest = () => boardActivity().reduce((m, a) => (a.at > m ? a.at : m), "");
-const commentHtml = (c, me, base) => `<div class="comment"><div class="head"><b>${esc(c.name)}</b>${ago(c.at)}${keyOf(c.name) === me ? `<button data-action="del-comment" data-cid="${c.id}">löschen</button>` : ""}</div><p>${linkify(c.text)}</p>${reactBar(c, `${base}/comments/${c.id}`, true)}</div>`;
+const commentHtml = (c, me, base) => `<div class="comment"><div class="head"><b>${esc(c.name)}</b>${ago(c.at)}${keyOf(c.name) === me || adminPw ? `<button data-action="del-comment" data-cid="${c.id}">löschen</button>` : ""}</div><p>${linkify(c.text)}</p>${reactBar(c, `${base}/comments/${c.id}`, true)}</div>`;
 function renderBoard() {
   const posts = [...state.posts].sort((a, b) => (b.pinned - a.pinned) || b.createdAt.localeCompare(a.createdAt));
   let h = `<form class="card composer" id="composer">
@@ -737,7 +746,7 @@ function postCard(p) {
       <button class="btn small" data-action="expand" aria-expanded="${open}">${I.chat}${cs.length ? cs.length + (cs.length === 1 ? " Antwort" : " Antworten") : "Antworten"}</button>
       <span class="spacer"></span>
       <button class="icon-btn pin ${p.pinned ? "on" : ""}" data-action="pin-post" aria-pressed="${!!p.pinned}" aria-label="${p.pinned ? "Nicht mehr anpinnen" : "Anpinnen"}" title="${p.pinned ? "Lösen" : "Anpinnen"}">${I.tack}</button>
-      <button class="icon-btn" data-action="del-post" aria-label="Beitrag löschen" title="Löschen">${I.trash}</button>
+      ${canManage(p) ? `<button class="icon-btn" data-action="del-post" aria-label="Beitrag löschen" title="Löschen">${I.trash}</button>` : ""}
     </div>
     ${open
       ? `<div class="comments">${cs.map((c) => commentHtml(c, me, `posts/${p.id}`)).join("")}
@@ -833,8 +842,8 @@ function expenseRow(x) {
     ${isT ? `<span class="avatar" style="background:var(--yes)">✓</span>` : avatar(x.paidBy)}
     <div class="grow"><b>${esc(x.title)}</b><span>${sub}</span></div>
     <span class="amt">${money(x.amount)}</span>
-    ${isT ? "" : `<button class="icon-btn" data-action="edit-expense" aria-label="Bearbeiten">${I.edit}</button>`}
-    <button class="icon-btn" data-action="del-expense" aria-label="Löschen">${I.trash}</button>
+    ${canManage(x) && !isT ? `<button class="icon-btn" data-action="edit-expense" aria-label="Bearbeiten">${I.edit}</button>` : ""}
+    ${canManage(x) ? `<button class="icon-btn" data-action="del-expense" aria-label="Löschen">${I.trash}</button>` : ""}
   </div>`;
 }
 
@@ -993,6 +1002,13 @@ if ("serviceWorker" in navigator) addEventListener("load", () => navigator.servi
 
 /* ---------- Push-Benachrichtigungen ---------- */
 const pushKey = () => "go-push:" + auth.slug;
+// Gespeicherte Wahl pro Gruppe ("all" | "important" | "off"). Ohne Wahl gilt: Hat das Gerät Benachrichtigungen
+// bereits erlaubt, ist die Gruppe automatisch auf "Alles" – dann wird auch nicht mehr nachgefragt.
+const pushLevel = () => {
+  const v = store.get(pushKey());
+  if (v) return v;
+  return pushSupported() && Notification.permission === "granted" ? "all" : null;
+};
 const pushSupported = () => "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
 const b64u = (s) => Uint8Array.from(atob((s + "=".repeat((4 - (s.length % 4)) % 4)).replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0));
 const withTimeout = (p, ms, msg) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(msg)), ms))]);
@@ -1012,8 +1028,8 @@ async function setPush(level) {
   if (level === "off") {
     const sub = await getSub(false).catch(() => null);
     if (sub) await api("POST", "push/unsubscribe", { endpoint: sub.endpoint }).catch(() => {});
-    store.del(pushKey());
-    if (sub && !groups.some((g) => store.get("go-push:" + g.slug))) await sub.unsubscribe().catch(() => {});
+    store.set(pushKey(), "off");
+    if (sub && groups.every((g) => store.get("go-push:" + g.slug) === "off")) await sub.unsubscribe().catch(() => {});
     return;
   }
   if (Notification.permission !== "granted") {
@@ -1027,14 +1043,15 @@ async function setPush(level) {
 
 // Beim Start: Anmeldung auffrischen (z. B. neuer Name, abgelaufenes Abo)
 async function syncPush() {
-  const level = store.get(pushKey());
-  if (!level || !pushSupported() || Notification.permission !== "granted") return;
+  const level = pushLevel();
+  if (!level || level === "off" || !pushSupported() || Notification.permission !== "granted") return;
   try { const sub = await getSub(true); await api("POST", "push/subscribe", { subscription: sub.toJSON(), level }); } catch {}
 }
 
 function updatePushBanner() {
   const b = $("#push-banner");
-  b.hidden = !auth || !pushSupported() || Notification.permission === "denied" || !!store.get(pushKey()) || !!store.get("go-push-dismissed:" + auth.slug);
+  // Nur fragen, wenn das Gerät noch nie gefragt wurde und für diese Gruppe nichts gewählt ist
+  b.hidden = !auth || !pushSupported() || Notification.permission !== "default" || !!store.get(pushKey()) || !!store.get("go-push-dismissed:" + auth.slug);
 }
 $("#push-banner-btn").onclick = async () => {
   try { await setPush("all"); toast("Benachrichtigungen aktiv 🔔"); } catch (e) { toast(e.message); }
@@ -1047,7 +1064,7 @@ const LEVEL_INFO = {
   important: "Nur @Erwähnungen, Antworten in deinen Unterhaltungen, Kosten, die dich betreffen, und Erinnerungen.",
 };
 function renderPushSettings() {
-  const level = store.get(pushKey());
+  const level = pushLevel();
   $("#push-group").textContent = "· " + (auth.groupName || auth.slug);
   const status = $("#push-status");
   const seg = $("#push-level"), info = $("#push-level-info"), en = $("#push-enable"), test = $("#push-test");
@@ -1060,9 +1077,11 @@ function renderPushSettings() {
   }
   if (Notification.permission === "denied") { status.textContent = "Im Browser blockiert. Erlaube Benachrichtigungen für diese Seite in den Website-Einstellungen und lade neu."; return; }
   if (!level) { status.textContent = "Aus. Aktiviere sie, um bei Neuigkeiten Bescheid zu bekommen – auch wenn die App zu ist."; en.hidden = false; return; }
-  status.textContent = "Aktiv auf diesem Gerät.";
-  seg.hidden = info.hidden = test.hidden = false;
+  seg.hidden = false;
   seg.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", b.dataset.level === level));
+  if (level === "off") { status.textContent = "Für diese Gruppe ausgeschaltet."; return; }
+  status.textContent = "Aktiv auf diesem Gerät.";
+  info.hidden = test.hidden = false;
   info.textContent = LEVEL_INFO[level];
 }
 $("#push-enable").onclick = async () => {
@@ -1118,6 +1137,41 @@ document.addEventListener("keydown", (e) => {
 mbox.addEventListener("mousedown", (e) => { e.preventDefault(); const b = e.target.closest("button"); if (b) pickMention(+b.dataset.i); });
 document.addEventListener("focusout", (e) => { if (e.target === mTarget) setTimeout(() => { if (document.activeElement !== mTarget) hideMentions(); }, 200); });
 addEventListener("scroll", () => { if (!mbox.hidden) hideMentions(); }, { passive: true });
+
+/* ---------- Admin-Modus ---------- */
+function renderAdmin() {
+  $("#admin-status").textContent = adminPw
+    ? "Aktiv – du kannst gerade alles bearbeiten und löschen, auch Sachen von anderen."
+    : "Normal darf jede:r nur eigene Termine, Umfragen, Beiträge, Kosten und Kommentare bearbeiten oder löschen.";
+  $("#admin-toggle").textContent = adminPw ? "Admin-Modus beenden" : "Admin-Modus aktivieren";
+  $("#me-admin").hidden = !adminPw;
+}
+$("#admin-toggle").onclick = async () => {
+  if (adminPw) { adminPw = ""; renderAdmin(); render(); return; }
+  const pw = prompt("Admin-Passwort:");
+  if (!pw) return;
+  try {
+    await api("POST", "admin/check", null, { "x-admin-password": pw });
+    adminPw = pw; toast("Admin-Modus aktiv");
+  } catch (e) { toast(e.message); }
+  renderAdmin(); render();
+};
+
+$("#rename-btn").onclick = async () => {
+  const pw = adminPw || prompt("Admin-Passwort:");
+  if (!pw) return;
+  const name = prompt("Neuer Name für die Gruppe:", auth.groupName || state.groupName || "");
+  if (!name || !name.trim()) return;
+  try {
+    const r = await api("POST", "admin/rename", { name: name.trim() }, { "x-admin-password": pw });
+    auth.groupName = state.groupName = r.groupName;
+    saveGroups();
+    $("#group-name").textContent = r.groupName;
+    document.title = r.groupName + " · Gruppenorganisator";
+    renderGroupList(); renderPushSettings();
+    toast("Gruppe umbenannt – alle sehen den neuen Namen beim nächsten Aktualisieren.");
+  } catch (e) { toast(e.message); }
+};
 
 /* ---------- Backups ---------- */
 function downloadJson(obj, filename) {
