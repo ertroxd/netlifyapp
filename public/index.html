@@ -50,6 +50,13 @@
       <button class="icon-btn" id="install-close" aria-label="Schließen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
     </div>
   </div>
+  <div class="wrap">
+    <div class="install" id="push-banner" hidden>
+      <div><b>Nichts mehr verpassen?</b><span>Benachrichtigungen bei neuen Terminen, Antworten und @Erwähnungen.</span></div>
+      <button class="btn small primary" id="push-banner-btn">Aktivieren</button>
+      <button class="icon-btn" id="push-banner-close" aria-label="Schließen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+    </div>
+  </div>
   <main class="wrap" id="main"><div class="loading">Lade…</div></main>
   <button class="btn primary fab" id="fab"></button>
   <nav class="bottom-nav" role="tablist">
@@ -89,14 +96,41 @@
 <!-- Gruppen -->
 <dialog id="groups-dlg">
   <form method="dialog">
-    <h2>Deine Gruppen</h2>
+    <h2>Gruppen &amp; Einstellungen</h2>
     <div class="group-list" id="group-list"></div>
     <div class="actions">
       <button type="button" class="btn small" id="g-invite">Einladen</button>
       <button type="button" class="btn small" id="g-join">Anderer Gruppe beitreten</button>
       <button type="button" class="btn small" id="g-create">Neue Gruppe</button>
-      <button type="button" class="btn small ghost danger" id="g-leave">Aktuelle Gruppe verlassen</button>
     </div>
+
+    <section class="settings">
+      <h3>Benachrichtigungen <span class="muted" id="push-group"></span></h3>
+      <p class="hint" id="push-status"></p>
+      <div class="seg" id="push-level" hidden>
+        <button type="button" data-level="all">Alles</button>
+        <button type="button" data-level="important">Nur Wichtiges</button>
+        <button type="button" data-level="off">Aus</button>
+      </div>
+      <p class="hint" id="push-level-info" hidden></p>
+      <div class="actions">
+        <button type="button" class="btn small primary" id="push-enable" hidden>Benachrichtigungen aktivieren</button>
+        <button type="button" class="btn small" id="push-test" hidden>Test senden</button>
+      </div>
+    </section>
+
+    <section class="settings">
+      <h3>Daten &amp; Backups</h3>
+      <p class="hint">Jede Nacht wird automatisch gesichert (14 Tage). Wiederherstellen braucht das Admin-Passwort.</p>
+      <div class="actions">
+        <button type="button" class="btn small" id="backup-download">Backup herunterladen</button>
+        <button type="button" class="btn small" id="backup-now">Jetzt sichern</button>
+        <label class="btn small">Aus Datei wiederherstellen<input type="file" accept="application/json,.json" id="backup-file" hidden></label>
+      </div>
+      <div class="rows backup-list" id="backup-list"></div>
+    </section>
+
+    <div class="actions"><button type="button" class="btn small ghost danger" id="g-leave">Aktuelle Gruppe auf diesem Gerät verlassen</button></div>
     <div class="dlg-foot"><button class="btn primary">Fertig</button></div>
   </form>
 </dialog>
@@ -178,6 +212,7 @@
 </dialog>
 
 <div class="toast" id="toast" hidden></div>
+<div class="mention-box" id="mention-box" role="listbox" hidden></div>
 
 <script src="/app.js"></script>
 </body>

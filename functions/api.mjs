@@ -1,8 +1,9 @@
 // Gruppenorganisator – API (Netlify Function + Netlify Blobs)
 // Alle Routen liegen unter /api/* und brauchen den Header "x-group-password".
 
-import { getStore } from "@netlify/blobs";
 import { randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
+import { MAIN, slugOk, metaStore, groupStore, readAll, DATA_PREFIXES, listBackups, restore, snapshot } from "../shared/store.mjs";
+import { notify, subKey, vapidKeys } from "../shared/push.mjs";
 
 class HttpError extends Error {
   constructor(status, message) {
@@ -28,12 +29,6 @@ function passwordOk(given, expected) {
   const a = Buffer.from(String(given ?? ""));
   const b = Buffer.from(String(expected));
   return a.length === b.length && timingSafeEqual(a, b);
-}
-
-async function readAll(store, prefix) {
-  const { blobs } = await store.list({ prefix });
-  const items = await Promise.all(blobs.map((b) => store.get(b.key, { type: "json" })));
-  return items.filter(Boolean);
 }
 
 async function mutate(store, key, fn) {
@@ -104,12 +99,6 @@ function expenseFields(b) {
 }
 
 // ---------- Gruppen ----------
-// "main" = ursprüngliche Gruppe (Passwort/Name aus GROUP_PASSWORD / GROUP_NAME, Daten im alten Store)
-const MAIN = "main";
-const slugOk = (s) => typeof s === "string" && /^[a-z0-9][a-z0-9-]{1,39}$/.test(s);
-const metaStore = () => getStore({ name: "gruppenorganisator-meta", consistency: "strong" });
-const groupStore = (slug) =>
-  getStore({ name: slug === MAIN ? "gruppenorganisator" : `gruppe-${slug}`, consistency: "strong" });
 const hashPw = (pw, salt) => scryptSync(String(pw ?? ""), salt, 32).toString("hex");
 
 async function resolveGroup(slug) {
@@ -139,6 +128,38 @@ function deleteComment(item, user, cid) {
   item.comments = item.comments.filter((c) => c.id !== cid);
 }
 
+// ---------- Reaktionen ----------
+const EMOJIS = new Set(["👍", "❤️", "😂", "😮", "😢", "🎉"]);
+function toggleReaction(target, user, emoji) {
+  if (!EMOJIS.has(emoji)) throw new HttpError(400, "Unbekannte Reaktion.");
+  target.reactions = target.reactions || {};
+  if (target.likes) { // alte Likes übernehmen
+    if (Object.keys(target.likes).length) target.reactions["❤️"] = { ...target.likes, ...(target.reactions["❤️"] || {}) };
+    delete target.likes;
+  }
+  const m = (target.reactions[emoji] = target.reactions[emoji] || {});
+  const k = nameKey(user);
+  if (m[k]) delete m[k];
+  else m[k] = user;
+  if (!Object.keys(m).length) delete target.reactions[emoji];
+}
+function findComment(item, cid) {
+  const c = (item.comments || []).find((c) => c.id === cid);
+  if (!c) throw new HttpError(404, "Kommentar nicht gefunden.");
+  return c;
+}
+
+const adminOk = (req) => {
+  const admin = process.env.ADMIN_PASSWORD || process.env.GROUP_PASSWORD;
+  if (!admin) throw new HttpError(500, "ADMIN_PASSWORD ist in Netlify nicht gesetzt.");
+  if (!passwordOk(req.headers.get("x-admin-password"), admin)) throw new HttpError(403, "Admin-Passwort ist falsch.");
+};
+const shortDate = (d) =>
+  new Date(d + "T12:00:00Z").toLocaleDateString("de-DE", { weekday: "short", day: "numeric", month: "short", timeZone: "UTC" });
+const euro = (c) => (c / 100).toLocaleString("de-DE", { style: "currency", currency: "EUR" });
+const clip = (t, n = 120) => (t.length > n ? t.slice(0, n - 1) + "…" : t);
+const commenters = (item) => [item.createdBy, ...(item.comments || []).map((c) => c.name)];
+
 function pollIsOpen(p) {
   return !p.closed && !(p.deadline && p.deadline < todayUTC());
 }
@@ -146,7 +167,7 @@ function pollIsOpen(p) {
 export default async (req) => {
   try {
     const url = new URL(req.url);
-    const [res, id, sub, subId] = url.pathname.replace(/^\/api\/?/, "").split("/").filter(Boolean);
+    const [res, id, sub, subId, subAction] = url.pathname.replace(/^\/api\/?/, "").split("/").filter(Boolean);
     let user = "";
     try {
       user = str(decodeURIComponent(req.headers.get("x-user-name") || ""), 40);
@@ -166,9 +187,7 @@ export default async (req) => {
 
     // Neue Gruppe anlegen (braucht das Admin-Passwort)
     if (res === "groups" && !id && req.method === "POST") {
-      const admin = process.env.ADMIN_PASSWORD || process.env.GROUP_PASSWORD;
-      if (!admin) throw new HttpError(500, "ADMIN_PASSWORD ist in Netlify nicht gesetzt.");
-      if (!passwordOk(req.headers.get("x-admin-password"), admin)) throw new HttpError(403, "Admin-Passwort ist falsch.");
+      adminOk(req);
       const b = await req.json().catch(() => ({}));
       const name = str(b.name, 60);
       const slug = str(b.slug, 40).toLowerCase();
@@ -190,7 +209,7 @@ export default async (req) => {
     const store = groupStore(group.slug);
     const groupName = group.name;
     const method = req.method;
-    const body = ["POST", "PUT", "PATCH"].includes(method) ? await req.json().catch(() => ({})) : {};
+    const body = ["POST", "PUT", "PATCH", "DELETE"].includes(method) ? await req.json().catch(() => ({})) : {};
 
     if (res === "login" && method === "POST") return json({ ok: true, groupName, slug: group.slug });
 
@@ -199,6 +218,63 @@ export default async (req) => {
         ["event:", "poll:", "post:", "expense:"].map((p) => readAll(store, p))
       );
       return json({ groupName, slug: group.slug, events, polls, posts, expenses, serverDate: todayUTC() });
+    }
+
+    // Link, der in Benachrichtigungen geöffnet wird
+    const link = (tab) => `/?g=${encodeURIComponent(group.slug)}&t=${tab}`;
+    const push = (opts) => notify(store, { actor: user, ...opts, title: opts.title, tag: opts.tag });
+
+    // ---------- Push-Benachrichtigungen ----------
+    if (res === "push") {
+      if (id === "key" && method === "GET") return json({ publicKey: (await vapidKeys()).publicKey });
+      if (id === "subscribe" && method === "POST") {
+        const s = body.subscription;
+        if (!s || typeof s.endpoint !== "string" || !/^https:\/\//.test(s.endpoint) || !s.keys?.p256dh || !s.keys?.auth)
+          throw new HttpError(400, "Ungültiges Abo.");
+        if (!user) throw new HttpError(400, "Bitte zuerst einen Namen eingeben.");
+        await store.setJSON(subKey(s.endpoint), {
+          subscription: { endpoint: s.endpoint, keys: { p256dh: String(s.keys.p256dh), auth: String(s.keys.auth) } },
+          name: user,
+          level: body.level === "important" ? "important" : "all",
+          updatedAt: new Date().toISOString(),
+        });
+        return json({ ok: true });
+      }
+      if ((id === "unsubscribe" && method === "POST") || (id === "subscribe" && method === "DELETE")) {
+        await store.delete(subKey(body.endpoint));
+        return json({ ok: true });
+      }
+      if (id === "test" && method === "POST") {
+        const s = await store.get(subKey(body.endpoint), { type: "json" });
+        if (!s) throw new HttpError(404, "Dieses Gerät ist nicht angemeldet.");
+        await notify(store, { title: "Test ✔", body: `Benachrichtigungen für „${groupName}“ funktionieren.`, direct: [s.name], url: link("events") });
+        return json({ ok: true });
+      }
+    }
+
+    // ---------- Backups ----------
+    if (res === "backup") {
+      if (!id && method === "GET") return json({ backups: await listBackups(store) });
+      if (id === "restore" && method === "POST") {
+        adminOk(req);
+        let data = body.data;
+        if (body.date) {
+          if (!/^[\w-]{1,40}$/.test(body.date)) throw new HttpError(400, "Ungültiges Backup.");
+          data = (await store.get(`backup:${body.date}`, { type: "json" }))?.data;
+          if (!data) throw new HttpError(404, "Backup nicht gefunden.");
+        }
+        try { await restore(store, data?.data || data); } catch (e) { throw new HttpError(400, e.message); }
+        return json({ ok: true });
+      }
+      if (id === "now" && method === "POST") {
+        await snapshot(store);
+        return json({ backups: await listBackups(store) });
+      }
+      if (id && method === "GET" && /^[\w-]{1,40}$/.test(id)) {
+        const b = await store.get(`backup:${id}`, { type: "json" });
+        if (!b) throw new HttpError(404, "Backup nicht gefunden.");
+        return json({ ...b, group: group.slug, groupName });
+      }
     }
 
     // Ab hier: alles Schreibende braucht einen Namen
@@ -219,6 +295,11 @@ export default async (req) => {
           comments: [],
         };
         await store.setJSON(`event:${item.id}`, item);
+        await push({
+          title: `Neuer Termin: ${item.title}`,
+          body: `${shortDate(item.date)}${item.time ? ", " + item.time + " Uhr" : ""}${item.location ? " · " + item.location : ""} – von ${user}`,
+          url: link("events"), tag: "ev-" + item.id, broadcast: true, mentionText: item.description,
+        });
         return json(item, 201);
       }
       if (id && !sub && method === "PUT") {
@@ -239,8 +320,17 @@ export default async (req) => {
           })
         );
       }
-      if (id && sub === "comments" && method === "POST") {
-        return json(await mutate(store, key, (e) => addComment(e, user, body.text)));
+      if (id && sub === "comments" && !subId && method === "POST") {
+        const e = await mutate(store, key, (e) => addComment(e, user, body.text));
+        const text = e.comments.at(-1).text;
+        await push({
+          title: `${user} zu „${clip(e.title, 50)}“`, body: clip(text), url: link("events"), tag: "evc-" + e.id,
+          broadcast: true, direct: commenters(e), mentionText: text,
+        });
+        return json(e);
+      }
+      if (id && sub === "comments" && subId && subAction === "react" && method === "POST") {
+        return json(await mutate(store, key, (e) => toggleReaction(findComment(e, subId), user, body.emoji)));
       }
       if (id && sub === "comments" && subId && method === "DELETE") {
         return json(await mutate(store, key, (e) => deleteComment(e, user, subId)));
@@ -277,6 +367,10 @@ export default async (req) => {
           createdAt: new Date().toISOString(),
         };
         await store.setJSON(`poll:${item.id}`, item);
+        await push({
+          title: `Neue Umfrage: ${item.title}`, body: `von ${user}${item.deadline ? " · bis " + shortDate(item.deadline) : ""}`,
+          url: link("polls"), tag: "poll-" + item.id, broadcast: true, mentionText: item.description,
+        });
         return json(item, 201);
       }
       if (id && !sub && method === "DELETE") {
@@ -341,31 +435,40 @@ export default async (req) => {
           text,
           imageId,
           pinned: false,
-          likes: {},
+          reactions: {},
           comments: [],
           createdBy: user,
           createdAt: new Date().toISOString(),
         };
         await store.setJSON(`post:${item.id}`, item);
+        await push({
+          title: `${user} auf der Pinnwand`, body: item.text ? clip(item.text) : "📷 Foto", url: link("board"),
+          tag: "post-" + item.id, broadcast: true, mentionText: item.text,
+        });
         return json(item, 201);
       }
       if (id && !sub && method === "DELETE") {
-        const post = await store.get(key, { type: "json" });
-        if (post?.imageId) await store.delete(`img:${post.imageId}`);
+        // Foto bleibt gespeichert, damit ein Backup den Beitrag vollständig wiederherstellen kann
         await store.delete(key);
         return json({ ok: true });
       }
-      if (id && sub === "like" && method === "POST") {
-        return json(
-          await mutate(store, key, (p) => {
-            const k = nameKey(user);
-            if (p.likes[k]) delete p.likes[k];
-            else p.likes[k] = user;
-          })
-        );
+      if (id && sub === "like" && method === "POST") { // alte App-Version
+        return json(await mutate(store, key, (p) => toggleReaction(p, user, "❤️")));
       }
-      if (id && sub === "comments" && method === "POST") {
-        return json(await mutate(store, key, (p) => addComment(p, user, body.text)));
+      if (id && sub === "react" && method === "POST") {
+        return json(await mutate(store, key, (p) => toggleReaction(p, user, body.emoji)));
+      }
+      if (id && sub === "comments" && !subId && method === "POST") {
+        const p = await mutate(store, key, (p) => addComment(p, user, body.text));
+        const text = p.comments.at(-1).text;
+        await push({
+          title: `${user} hat geantwortet`, body: clip(text), url: link("board"), tag: "postc-" + p.id,
+          broadcast: true, direct: commenters(p), mentionText: text,
+        });
+        return json(p);
+      }
+      if (id && sub === "comments" && subId && subAction === "react" && method === "POST") {
+        return json(await mutate(store, key, (p) => toggleReaction(findComment(p, subId), user, body.emoji)));
       }
       if (id && sub === "comments" && subId && method === "DELETE") {
         return json(await mutate(store, key, (p) => deleteComment(p, user, subId)));
@@ -382,6 +485,15 @@ export default async (req) => {
       if (!id && method === "POST") {
         const item = { id: randomUUID(), ...expenseFields(body), createdBy: user, createdAt: new Date().toISOString() };
         await store.setJSON(`expense:${item.id}`, item);
+        const n = item.participants.length;
+        if (item.type === "transfer") {
+          await push({ title: "Ausgleich eingetragen", body: `${item.paidBy} → ${item.participants[0]}: ${euro(item.amount)}`, url: link("costs"), direct: [item.paidBy, item.participants[0]] });
+        } else {
+          await push({
+            title: `${euro(item.amount)} für ${clip(item.title, 40)}`, url: link("costs"), direct: item.participants,
+            body: `${item.paidBy} hat bezahlt – dein Anteil: ca. ${euro(Math.round(item.amount / n))}`, mentionText: item.note,
+          });
+        }
         return json(item, 201);
       }
       if (id && !sub && method === "PUT") {

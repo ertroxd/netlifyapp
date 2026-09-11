@@ -243,3 +243,46 @@ select{appearance:auto}
 .post .comments{margin-top:10px}
 .reply-preview{margin-top:8px;font-size:13.5px;color:var(--muted);overflow-wrap:anywhere}
 .reply-preview b{color:var(--text)}
+
+/* Reaktionen */
+.reacts{display:flex;flex-wrap:wrap;gap:5px;align-items:center;margin-top:10px;position:relative}
+.reacts.small{margin-top:6px;gap:4px}
+.react{border:1px solid var(--line);background:var(--surface);border-radius:20px;padding:2px 9px;font-size:14px;display:inline-flex;align-items:center;gap:4px;line-height:1.5}
+.react span{font-size:12.5px;font-weight:700;color:var(--muted)}
+.react.on{background:var(--accent-soft);border-color:var(--accent)}
+.react.on span{color:var(--accent)}
+.react.add{color:var(--muted);padding:3px 8px}
+.react.add svg{width:17px;height:17px;display:block}
+.reacts.small .react{font-size:12.5px;padding:0 7px;background:transparent}
+.reacts.small .react.add{border-color:transparent;padding:1px 5px}
+.reacts.small .react.add svg{width:15px;height:15px}
+.comment .reacts.small .react.on{background:var(--accent-soft)}
+.picker{display:inline-flex;gap:2px;background:var(--surface);border:1px solid var(--line);border-radius:22px;padding:2px 4px;box-shadow:var(--shadow)}
+.picker button{border:0;background:none;font-size:20px;padding:2px 4px;border-radius:8px;line-height:1.2}
+.picker button:hover{background:var(--surface-2);transform:scale(1.15)}
+
+/* Erwähnungen */
+.mention{color:var(--accent);font-weight:600}
+.mention.me{background:var(--accent-soft);border-radius:4px;padding:0 3px}
+.mention-box{position:absolute;z-index:60;background:var(--surface);border:1px solid var(--line);border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,.15);padding:4px;min-width:180px;max-width:calc(100vw - 32px)}
+.mention-box button{display:flex;align-items:center;gap:8px;width:100%;border:0;background:none;padding:6px 8px;border-radius:8px;text-align:left;font-size:14px}
+.mention-box button[aria-selected=true],.mention-box button:hover{background:var(--surface-2)}
+.mention-box .avatar{width:24px;height:24px;font-size:11px}
+
+/* Einstellungen */
+.settings{border-top:1px solid var(--line);padding-top:14px;display:grid;gap:8px}
+.settings h3{margin:0;font-size:15px}
+.settings .hint{margin:0}
+.backup-list .row{padding:7px 0}
+.backup-list .grow b{font-weight:600;font-size:14px}
+dialog .actions{margin-top:2px}
+dialog{overflow:auto}
+dialog form > *{min-width:0}
+.backup-list .row{flex-wrap:wrap;gap:6px 8px}
+.backup-list .row .grow{flex-basis:140px}
+.settings label.btn{color:var(--text);display:inline-flex}
+.settings .seg button{padding:7px 4px}
+.post-foot .reacts{margin-top:0}
+.post-foot .icon-btn.pin{color:var(--muted)}
+.post-foot .icon-btn.pin.on{color:var(--accent);background:var(--accent-soft)}
+.post-foot .icon-btn svg{width:17px;height:17px}

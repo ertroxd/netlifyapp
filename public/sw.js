@@ -1,5 +1,5 @@
 // Service Worker: App offline startbar machen + letzten Stand zwischenspeichern.
-const SHELL = "go-shell-v3";
+const SHELL = "go-shell-v4";
 const DATA = "go-data";
 const IMAGES = "go-images";
 const SHELL_FILES = ["/", "/app.css", "/app.js", "/manifest.webmanifest", "/icons/icon-192.png"];
@@ -46,4 +46,34 @@ self.addEventListener("fetch", (e) => {
   if (url.pathname === "/api/state") { e.respondWith(networkFirst(req, DATA)); return; }
   if (url.pathname.startsWith("/api/")) return;
   e.respondWith(networkFirst(req, SHELL));
+});
+
+// ---------- Push-Benachrichtigungen ----------
+self.addEventListener("push", (e) => {
+  let d = {};
+  try { d = e.data ? e.data.json() : {}; } catch { d = { body: e.data?.text() }; }
+  e.waitUntil(
+    self.registration.showNotification(d.title || "Gruppenorganisator", {
+      body: d.body || "",
+      icon: "/icons/icon-192.png",
+      badge: "/icons/icon-192.png",
+      tag: d.tag,
+      renotify: !!d.tag,
+      data: { url: d.url || "/" },
+    })
+  );
+});
+
+self.addEventListener("notificationclick", (e) => {
+  e.notification.close();
+  const url = new URL(e.notification.data?.url || "/", self.location.origin).href;
+  e.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then(async (list) => {
+      for (const c of list) {
+        if (new URL(c.url).origin !== self.location.origin) continue;
+        try { await c.focus(); return await c.navigate(url); } catch {}
+      }
+      return self.clients.openWindow(url);
+    })
+  );
 });

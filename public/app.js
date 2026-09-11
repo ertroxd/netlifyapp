@@ -43,6 +43,9 @@ const I = {
   heart: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 20s-7.5-4.6-7.5-10A4.3 4.3 0 0 1 12 7.4 4.3 4.3 0 0 1 19.5 10c0 5.4-7.5 10-7.5 10z"/></svg>',
   edit: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4L19 9l-4-4L4 16z"/></svg>',
   trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 7h14M10 7V4h4v3M7 7l1 13h8l1-13"/></svg>',
+  smile: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M8.5 14.5c1.8 2 5.2 2 7 0M9 9.5h.01M15 9.5h.01"/><path d="M19 3v4M17 5h4" stroke-width="1.8"/></svg>',
+  tack: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4h6l-1 5 3 3H7l3-3zM12 12v8"/></svg>',
+  bell: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z"/><path d="M10 20.5a2 2 0 0 0 4 0"/></svg>',
   plus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
 };
 
@@ -58,10 +61,11 @@ let auth = groups.find((g) => g.slug === store.get("go-current")) || groups[0] |
 const saveGroups = () => { store.set("go-groups", groups); store.set("go-current", auth?.slug || null); };
 const slugify = (s) => String(s).toLowerCase().replace(/ä/g, "ae").replace(/ö/g, "oe").replace(/ü/g, "ue").replace(/ß/g, "ss").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
 const inviteParam = new URLSearchParams(location.search).get("g");
+const tabParam = new URLSearchParams(location.search).get("t");
 let state = { events: [], polls: [], posts: [], expenses: [], groupName: "" };
 let loaded = false;
 const TABS = ["events", "polls", "board", "costs"];
-let tab = TABS.includes(store.get("go-tab")) ? store.get("go-tab") : "events";
+let tab = TABS.includes(tabParam) ? tabParam : TABS.includes(store.get("go-tab")) ? store.get("go-tab") : "events";
 const expanded = new Set();
 let showPast = false, showClosed = false, showAllExpenses = false;
 let editingEventId = null;
@@ -73,7 +77,7 @@ const euro = new Intl.NumberFormat("de-DE", { style: "currency", currency: "EUR"
 const money = (cents) => euro.format(cents / 100);
 
 /* ---------- API ---------- */
-async function api(method, path, body) {
+async function api(method, path, body, extraHeaders = {}) {
   const r = await fetch("/api/" + path, {
     method,
     headers: {
@@ -81,6 +85,7 @@ async function api(method, path, body) {
       "x-group": auth?.slug || "main",
       "x-group-password": auth?.pw || "",
       "x-user-name": encodeURIComponent(auth?.name || ""),
+      ...extraHeaders,
     },
     body: body ? JSON.stringify(body) : undefined,
   }).catch(() => { throw new Error("Keine Verbindung – bitte später nochmal versuchen."); });
@@ -191,6 +196,8 @@ function openGroups() {
       <span class="grow"><b>${esc(g.groupName || g.slug)}</b><span>Code: ${esc(g.slug === "main" ? "Hauptgruppe" : g.slug)} · als ${esc(g.name)}${g.pw ? "" : " · Anmeldung nötig"}</span></span>
     </button>`).join("");
   $("#groups-dlg").showModal();
+  renderPushSettings();
+  loadBackups();
 }
 $("#group-list").addEventListener("click", (ev) => {
   const b = ev.target.closest("[data-slug]"); if (!b) return;
@@ -246,6 +253,8 @@ function startApp() {
   $("#me-name").textContent = auth.name;
   $("#group-name").textContent = auth.groupName || state.groupName || "Gruppe";
   updateInstallBanner();
+  updatePushBanner();
+  syncPush();
   render();
   refresh();
 }
@@ -256,7 +265,11 @@ function knownPeople() {
   const add = (n) => n && !m.has(keyOf(n)) && m.set(keyOf(n), n);
   for (const e of state.events) { add(e.createdBy); Object.values(e.rsvps || {}).forEach((r) => add(r.name)); (e.comments || []).forEach((c) => add(c.name)); }
   for (const p of state.polls) { add(p.createdBy); Object.values(p.votes || {}).forEach((v) => add(v.name)); }
-  for (const p of state.posts || []) { add(p.createdBy); Object.values(p.likes || {}).forEach(add); }
+  const addReacts = (x) => Object.values(x.reactions || {}).forEach((m) => Object.values(m).forEach(add));
+  for (const p of state.posts || []) {
+    add(p.createdBy); Object.values(p.likes || {}).forEach(add); addReacts(p);
+    (p.comments || []).forEach((c) => { add(c.name); addReacts(c); });
+  }
   for (const x of state.expenses || []) { add(x.paidBy); x.participants.forEach(add); }
   add(auth?.name);
   return m;
@@ -298,7 +311,37 @@ function settleUp(list) {
 }
 const hue = (name) => [...keyOf(name)].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 7);
 const avatar = (name) => `<span class="avatar" style="background:hsl(${hue(name)} 55% 50%)">${esc((name || "?").trim()[0]?.toUpperCase() || "?")}</span>`;
-const linkify = (s) => esc(s).replace(/(https?:\/\/[^\s<]+[^\s<.,;:!?)\]'"])/g, '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>');
+const reEsc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function linkify(s) {
+  let h = esc(s).replace(/(https?:\/\/[^\s<]+[^\s<.,;:!?)\]'"])/g, '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>');
+  if (!h.includes("@")) return h;
+  const me = keyOf(auth?.name);
+  const names = [...knownPeople().values()].sort((a, b) => b.length - a.length);
+  for (const n of names) {
+    h = h.replace(new RegExp("(^|[^\\w/])@(" + reEsc(esc(n)) + ")(?![\\p{L}\\p{N}_])", "giu"),
+      (_, pre, nm) => `${pre}<span class="mention ${keyOf(n) === me ? "me" : ""}">@${nm}</span>`);
+  }
+  return h;
+}
+
+/* ---------- Reaktionen ---------- */
+const EMOJIS = ["👍", "❤️", "😂", "😮", "😢", "🎉"];
+function reactionsOf(x) {
+  const r = { ...(x.reactions || {}) };
+  if (x.likes && Object.keys(x.likes).length) r["❤️"] = { ...x.likes, ...(r["❤️"] || {}) };
+  return r;
+}
+function reactBar(x, path, small = false) {
+  const me = keyOf(auth.name);
+  const r = reactionsOf(x);
+  const chips = EMOJIS.filter((e) => r[e] && Object.keys(r[e]).length).map((e) => {
+    const who = Object.values(r[e]);
+    return `<button class="react ${r[e][me] ? "on" : ""}" data-action="react" data-path="${path}" data-emoji="${e}" title="${esc(who.join(", "))}" aria-label="${e} von ${esc(who.join(", "))}">${e}<span>${who.length}</span></button>`;
+  }).join("");
+  const open = expanded.has("pick:" + path);
+  return `<div class="reacts ${small ? "small" : ""}">${chips}<button class="react add" data-action="pick" data-path="${path}" aria-expanded="${open}" aria-label="Reaktion hinzufügen">${I.smile}</button>${
+    open ? `<span class="picker">${EMOJIS.map((e) => `<button data-action="react" data-path="${path}" data-emoji="${e}" aria-label="${e}">${e}</button>`).join("")}</span>` : ""}</div>`;
+}
 const pollOpen = (p) => !p.closed && !(p.deadline && p.deadline < todayISO());
 
 function render() {
@@ -395,8 +438,8 @@ function eventCard(e, isPast) {
         </div>
         ${!isPast && mine ? `<form class="inline-form" data-action="note"><input type="text" name="note" maxlength="140" data-draft="note-${e.id}" placeholder="Notiz zu deiner Antwort, z. B. „komme später“" value="${esc(e.rsvps[me].note || "")}"><button class="btn small">Speichern</button></form>` : ""}
         <div class="comments">
-          ${(e.comments || []).map((c) => commentHtml(c, me)).join("")}
-          <form class="inline-form" data-action="comment"><input type="text" name="text" maxlength="1000" data-draft="c-${e.id}" placeholder="Kommentar schreiben…" required><button class="btn small primary">Senden</button></form>
+          ${(e.comments || []).map((c) => commentHtml(c, me, `events/${e.id}`)).join("")}
+          <form class="inline-form" data-action="comment"><input type="text" name="text" maxlength="1000" data-draft="c-${e.id}" data-mention placeholder="Kommentar schreiben… (@ für Erwähnung)" required><button class="btn small primary">Senden</button></form>
         </div>
         ${eventCostLine(e)}
         <div class="actions">
@@ -663,11 +706,11 @@ async function share(text) {
 /* ---------- Pinnwand ---------- */
 const boardActivity = () => (state.posts || []).flatMap((p) => [{ at: p.createdAt, name: p.createdBy }, ...(p.comments || []).map((c) => ({ at: c.at, name: c.name }))]);
 const boardNewest = () => boardActivity().reduce((m, a) => (a.at > m ? a.at : m), "");
-const commentHtml = (c, me) => `<div class="comment"><div class="head"><b>${esc(c.name)}</b>${ago(c.at)}${keyOf(c.name) === me ? `<button data-action="del-comment" data-cid="${c.id}">löschen</button>` : ""}</div><p>${linkify(c.text)}</p></div>`;
+const commentHtml = (c, me, base) => `<div class="comment"><div class="head"><b>${esc(c.name)}</b>${ago(c.at)}${keyOf(c.name) === me ? `<button data-action="del-comment" data-cid="${c.id}">löschen</button>` : ""}</div><p>${linkify(c.text)}</p>${reactBar(c, `${base}/comments/${c.id}`, true)}</div>`;
 function renderBoard() {
   const posts = [...state.posts].sort((a, b) => (b.pinned - a.pinned) || b.createdAt.localeCompare(a.createdAt));
   let h = `<form class="card composer" id="composer">
-    <textarea name="text" maxlength="3000" data-draft="composer" placeholder="Was gibt's Neues? Idee, Link, Foto …"></textarea>
+    <textarea name="text" maxlength="3000" data-draft="composer" data-mention placeholder="Was gibt's Neues? Idee, Link, Foto … (@Name erwähnt jemanden)"></textarea>
     ${composerImage ? `<div class="thumb"><img src="${composerImage}" alt="Vorschau"><button type="button" data-action="rm-image" aria-label="Foto entfernen">${I.x}</button></div>` : ""}
     <div class="composer-row">
       <label class="btn small">${I.camera}Foto<input type="file" accept="image/*" id="photo-input" hidden></label>
@@ -683,7 +726,6 @@ function renderBoard() {
 
 function postCard(p) {
   const me = keyOf(auth.name);
-  const likes = Object.values(p.likes || {});
   const cs = p.comments || [];
   const open = expanded.has(p.id);
   return `<article class="card post ${p.pinned ? "pinned" : ""}" data-type="post" data-id="${p.id}">
@@ -691,16 +733,15 @@ function postCard(p) {
     ${p.text ? `<p class="text">${linkify(p.text)}</p>` : ""}
     ${p.imageId ? `<a class="photo" href="/api/img/${esc(auth.slug)}/${p.imageId}" target="_blank" rel="noopener"><img src="/api/img/${esc(auth.slug)}/${p.imageId}" alt="Foto von ${esc(p.createdBy)}" loading="lazy"></a>` : ""}
     <div class="post-foot">
-      <button class="btn small like" data-action="like" aria-pressed="${!!p.likes?.[me]}" aria-label="Gefällt mir">${I.heart}${likes.length || ""}</button>
+      ${reactBar(p, `posts/${p.id}`)}
       <button class="btn small" data-action="expand" aria-expanded="${open}">${I.chat}${cs.length ? cs.length + (cs.length === 1 ? " Antwort" : " Antworten") : "Antworten"}</button>
       <span class="spacer"></span>
-      <button class="btn small ghost" data-action="pin-post">${p.pinned ? "Lösen" : "Anpinnen"}</button>
+      <button class="icon-btn pin ${p.pinned ? "on" : ""}" data-action="pin-post" aria-pressed="${!!p.pinned}" aria-label="${p.pinned ? "Nicht mehr anpinnen" : "Anpinnen"}" title="${p.pinned ? "Lösen" : "Anpinnen"}">${I.tack}</button>
       <button class="icon-btn" data-action="del-post" aria-label="Beitrag löschen" title="Löschen">${I.trash}</button>
     </div>
-    ${likes.length ? `<div class="likers">${esc(likes.join(", "))} gefällt das</div>` : ""}
     ${open
-      ? `<div class="comments">${cs.map((c) => commentHtml(c, me)).join("")}
-          <form class="inline-form" data-action="post-comment"><input type="text" name="text" maxlength="1000" data-draft="pc-${p.id}" placeholder="Antworten…" required><button class="btn small primary">Senden</button></form></div>`
+      ? `<div class="comments">${cs.map((c) => commentHtml(c, me, `posts/${p.id}`)).join("")}
+          <form class="inline-form" data-action="post-comment"><input type="text" name="text" maxlength="1000" data-draft="pc-${p.id}" data-mention placeholder="Antworten… (@ für Erwähnung)" required><button class="btn small primary">Senden</button></form></div>`
       : cs.length ? `<div class="reply-preview"><b>${esc(cs[cs.length - 1].name)}:</b> ${esc(cs[cs.length - 1].text.slice(0, 140))}${cs[cs.length - 1].text.length > 140 ? "…" : ""}</div>` : ""}
   </article>`;
 }
@@ -894,7 +935,19 @@ $("#main").addEventListener("click", (ev) => {
   const x = state.expenses.find((y) => y.id === id);
   switch (el.dataset.action) {
     case "rm-image": composerImage = null; return render();
-    case "like": return run(async () => upsert("posts", await api("POST", `posts/${id}/like`)));
+    case "pick": {
+      const k = "pick:" + el.dataset.path;
+      const was = expanded.has(k);
+      [...expanded].filter((x) => x.startsWith("pick:")).forEach((x) => expanded.delete(x));
+      if (!was) expanded.add(k);
+      return render();
+    }
+    case "react": {
+      const path = el.dataset.path;
+      [...expanded].filter((x) => x.startsWith("pick:")).forEach((x) => expanded.delete(x));
+      const kind = path.startsWith("posts/") ? "posts" : "events";
+      return run(async () => upsert(kind, await api("POST", path + "/react", { emoji: el.dataset.emoji })));
+    }
     case "pin-post": return run(async () => upsert("posts", await api("POST", `posts/${id}/pin`, { pinned: !post.pinned })));
     case "del-post":
       if (!confirm("Beitrag wirklich löschen?")) return;
@@ -937,6 +990,192 @@ $("#install-btn").onclick = async () => {
 };
 $("#install-close").onclick = () => { store.set("go-install-dismissed", true); $("#install").hidden = true; };
 if ("serviceWorker" in navigator) addEventListener("load", () => navigator.serviceWorker.register("/sw.js").catch(() => {}));
+
+/* ---------- Push-Benachrichtigungen ---------- */
+const pushKey = () => "go-push:" + auth.slug;
+const pushSupported = () => "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+const b64u = (s) => Uint8Array.from(atob((s + "=".repeat((4 - (s.length % 4)) % 4)).replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0));
+const withTimeout = (p, ms, msg) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(msg)), ms))]);
+
+async function getSub(create) {
+  const reg = await withTimeout(navigator.serviceWorker.ready, 8000, "Service Worker nicht bereit – Seite neu laden.");
+  let sub = await reg.pushManager.getSubscription();
+  if (!create) return sub;
+  const { publicKey } = await api("GET", "push/key");
+  const key = b64u(publicKey);
+  const same = (a, b) => a && a.byteLength === b.byteLength && new Uint8Array(a).every((v, i) => v === b[i]);
+  if (sub && !same(sub.options?.applicationServerKey, key)) { await sub.unsubscribe().catch(() => {}); sub = null; }
+  return sub || reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+}
+
+async function setPush(level) {
+  if (level === "off") {
+    const sub = await getSub(false).catch(() => null);
+    if (sub) await api("POST", "push/unsubscribe", { endpoint: sub.endpoint }).catch(() => {});
+    store.del(pushKey());
+    if (sub && !groups.some((g) => store.get("go-push:" + g.slug))) await sub.unsubscribe().catch(() => {});
+    return;
+  }
+  if (Notification.permission !== "granted") {
+    const p = await Notification.requestPermission();
+    if (p !== "granted") throw new Error(p === "denied" ? "Benachrichtigungen sind im Browser blockiert – bitte in den Website-Einstellungen erlauben." : "Benachrichtigungen wurden nicht erlaubt.");
+  }
+  const sub = await getSub(true);
+  await api("POST", "push/subscribe", { subscription: sub.toJSON(), level });
+  store.set(pushKey(), level);
+}
+
+// Beim Start: Anmeldung auffrischen (z. B. neuer Name, abgelaufenes Abo)
+async function syncPush() {
+  const level = store.get(pushKey());
+  if (!level || !pushSupported() || Notification.permission !== "granted") return;
+  try { const sub = await getSub(true); await api("POST", "push/subscribe", { subscription: sub.toJSON(), level }); } catch {}
+}
+
+function updatePushBanner() {
+  const b = $("#push-banner");
+  b.hidden = !auth || !pushSupported() || Notification.permission === "denied" || !!store.get(pushKey()) || !!store.get("go-push-dismissed:" + auth.slug);
+}
+$("#push-banner-btn").onclick = async () => {
+  try { await setPush("all"); toast("Benachrichtigungen aktiv 🔔"); } catch (e) { toast(e.message); }
+  updatePushBanner();
+};
+$("#push-banner-close").onclick = () => { store.set("go-push-dismissed:" + auth.slug, true); updatePushBanner(); toast("Kannst du jederzeit unter „Gruppen“ aktivieren."); };
+
+const LEVEL_INFO = {
+  all: "Neue Termine, Umfragen, Beiträge und Kommentare – plus alles Wichtige.",
+  important: "Nur @Erwähnungen, Antworten in deinen Unterhaltungen, Kosten, die dich betreffen, und Erinnerungen.",
+};
+function renderPushSettings() {
+  const level = store.get(pushKey());
+  $("#push-group").textContent = "· " + (auth.groupName || auth.slug);
+  const status = $("#push-status");
+  const seg = $("#push-level"), info = $("#push-level-info"), en = $("#push-enable"), test = $("#push-test");
+  seg.hidden = info.hidden = en.hidden = test.hidden = true;
+  if (!pushSupported()) {
+    status.textContent = isIOS && !isStandalone()
+      ? "Auf dem iPhone gehen Benachrichtigungen nur in der installierten App: in Safari auf Teilen → „Zum Home-Bildschirm“, dann die App von dort öffnen."
+      : "Dieser Browser unterstützt leider keine Benachrichtigungen.";
+    return;
+  }
+  if (Notification.permission === "denied") { status.textContent = "Im Browser blockiert. Erlaube Benachrichtigungen für diese Seite in den Website-Einstellungen und lade neu."; return; }
+  if (!level) { status.textContent = "Aus. Aktiviere sie, um bei Neuigkeiten Bescheid zu bekommen – auch wenn die App zu ist."; en.hidden = false; return; }
+  status.textContent = "Aktiv auf diesem Gerät.";
+  seg.hidden = info.hidden = test.hidden = false;
+  seg.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", b.dataset.level === level));
+  info.textContent = LEVEL_INFO[level];
+}
+$("#push-enable").onclick = async () => {
+  try { await setPush("all"); toast("Benachrichtigungen aktiv 🔔"); } catch (e) { toast(e.message); }
+  renderPushSettings(); updatePushBanner();
+};
+$("#push-level").addEventListener("click", async (ev) => {
+  const b = ev.target.closest("[data-level]"); if (!b) return;
+  try { await setPush(b.dataset.level); } catch (e) { toast(e.message); }
+  renderPushSettings(); updatePushBanner();
+});
+$("#push-test").onclick = async () => {
+  try { const sub = await getSub(false); if (!sub) throw new Error("Dieses Gerät ist nicht angemeldet."); await api("POST", "push/test", { endpoint: sub.endpoint }); toast("Test gesendet – kommt gleich an."); }
+  catch (e) { toast(e.message); }
+};
+
+/* ---------- @Erwähnungen ---------- */
+const mbox = $("#mention-box");
+let mTarget = null, mStart = 0, mIndex = 0, mList = [];
+function showMentions(el) {
+  const pos = el.selectionStart ?? el.value.length;
+  const m = /(^|\s)@([\p{L}\p{N}_.-]*)$/u.exec(el.value.slice(0, pos));
+  if (!m) return hideMentions();
+  const me = keyOf(auth.name), q = m[2].toLowerCase();
+  mList = [...knownPeople().values()].filter((n) => keyOf(n) !== me && keyOf(n).startsWith(q)).sort((a, b) => a.localeCompare(b, "de")).slice(0, 6);
+  if (!mList.length) return hideMentions();
+  mTarget = el; mStart = pos - m[2].length - 1; mIndex = 0;
+  mbox.innerHTML = mList.map((n, i) => `<button type="button" data-i="${i}" role="option" aria-selected="${i === 0}">${avatar(n)}${esc(n)}</button>`).join("");
+  mbox.hidden = false;
+  const r = el.getBoundingClientRect();
+  mbox.style.left = Math.max(8, Math.min(r.left, innerWidth - mbox.offsetWidth - 8)) + scrollX + "px";
+  mbox.style.top = r.bottom + scrollY + 4 + "px";
+}
+function hideMentions() { mbox.hidden = true; mTarget = null; }
+function pickMention(i) {
+  const el = mTarget, n = mList[i];
+  if (!el || !n) return;
+  const pos = el.selectionStart ?? el.value.length;
+  el.value = el.value.slice(0, mStart) + "@" + n + " " + el.value.slice(pos);
+  const c = mStart + n.length + 2;
+  el.focus(); el.setSelectionRange(c, c); hideMentions();
+}
+document.addEventListener("input", (e) => { if (e.target.matches?.("[data-mention]")) showMentions(e.target); });
+document.addEventListener("keydown", (e) => {
+  if (mbox.hidden || e.target !== mTarget) return;
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault();
+    mIndex = (mIndex + (e.key === "ArrowDown" ? 1 : mList.length - 1)) % mList.length;
+    mbox.querySelectorAll("button").forEach((b, i) => b.setAttribute("aria-selected", i === mIndex));
+  } else if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); pickMention(mIndex); }
+  else if (e.key === "Escape") hideMentions();
+});
+mbox.addEventListener("mousedown", (e) => { e.preventDefault(); const b = e.target.closest("button"); if (b) pickMention(+b.dataset.i); });
+document.addEventListener("focusout", (e) => { if (e.target === mTarget) setTimeout(() => { if (document.activeElement !== mTarget) hideMentions(); }, 200); });
+addEventListener("scroll", () => { if (!mbox.hidden) hideMentions(); }, { passive: true });
+
+/* ---------- Backups ---------- */
+function downloadJson(obj, filename) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([JSON.stringify(obj, null, 1)], { type: "application/json" }));
+  a.download = filename;
+  document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+const backupLabel = (b) => /^\d{4}-\d{2}-\d{2}$/.test(b)
+  ? "Automatisch · " + fmtLong(b)
+  : b.includes("vor-restore") ? `Stand vor Wiederherstellung · ${fmt(b.slice(0, 10), { day: "numeric", month: "short" })}, ${b.slice(11, 13)}:${b.slice(13, 15)} UTC` : b;
+async function loadBackups() {
+  const box = $("#backup-list");
+  box.innerHTML = '<p class="hint">Lade Backups…</p>';
+  try {
+    const { backups } = await api("GET", "backup");
+    box.innerHTML = backups.length
+      ? backups.map((b) => `<div class="row"><div class="grow"><b>${esc(backupLabel(b))}</b></div>
+          <button type="button" class="btn small ghost" data-bdl="${esc(b)}">Laden</button>
+          <button type="button" class="btn small" data-restore="${esc(b)}">Wiederherstellen</button></div>`).join("")
+      : '<p class="hint">Noch keine automatischen Backups – das erste entsteht heute Abend (oder „Jetzt sichern“).</p>';
+  } catch (e) { box.innerHTML = `<p class="hint">${esc(e.message)}</p>`; }
+}
+async function doRestore(body, what) {
+  if (!confirm(`${what} wiederherstellen?\n\nAlle aktuellen Termine, Umfragen, Beiträge und Kosten dieser Gruppe werden dadurch ersetzt. Der jetzige Stand wird vorher automatisch gesichert.`)) return;
+  const admin = prompt("Admin-Passwort:");
+  if (!admin) return;
+  try {
+    await api("POST", "backup/restore", body, { "x-admin-password": admin });
+    toast("Wiederhergestellt ✔");
+    $("#groups-dlg").close();
+    await refresh();
+  } catch (e) { toast(e.message); }
+}
+$("#backup-list").addEventListener("click", async (ev) => {
+  const dl = ev.target.closest("[data-bdl]"), rs = ev.target.closest("[data-restore]");
+  if (dl) {
+    try { downloadJson(await api("GET", "backup/" + encodeURIComponent(dl.dataset.bdl)), `backup-${auth.slug}-${dl.dataset.bdl}.json`); }
+    catch (e) { toast(e.message); }
+  }
+  if (rs) doRestore({ date: rs.dataset.restore }, `Backup „${backupLabel(rs.dataset.restore)}“`);
+});
+$("#backup-download").onclick = () => {
+  const { events, polls, posts, expenses } = state;
+  downloadJson({ version: 1, group: auth.slug, groupName: auth.groupName, createdAt: new Date().toISOString(), data: { events, polls, posts, expenses } }, `backup-${auth.slug}-${todayISO()}.json`);
+};
+$("#backup-now").onclick = async () => {
+  try { await api("POST", "backup/now"); toast("Gesichert ✔"); loadBackups(); } catch (e) { toast(e.message); }
+};
+$("#backup-file").addEventListener("change", async (ev) => {
+  const f = ev.target.files[0]; ev.target.value = "";
+  if (!f) return;
+  try {
+    const parsed = JSON.parse(await f.text());
+    doRestore({ data: parsed.data || parsed }, `Datei „${f.name}“`);
+  } catch { toast("Das ist keine gültige Backup-Datei."); }
+});
 
 /* ---------- Auto-Aktualisierung ---------- */
 setInterval(() => {
